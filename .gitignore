@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Python (backend/ has its own too, but cover root-level just in case)
+__pycache__/
+*.pyc
+.venv/
+.env
+.pytest_cache/
+
+# Node (frontend/ has its own too)
+node_modules/
+dist/
+dist-*/
+*.log
+
+# Local scratch
+*.tmp

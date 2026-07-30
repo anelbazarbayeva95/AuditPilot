@@ -1,0 +1,214 @@
+@import url("https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=Instrument+Sans:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-ink: var(--ink);
+  --color-ink-foreground: var(--ink-foreground);
+  --color-ink-muted: var(--ink-muted);
+  --color-status-good: var(--status-good);
+  --color-status-needs-work: var(--status-needs-work);
+  --color-status-poor: var(--status-poor);
+  --color-link: var(--link);
+  --color-quickfix-bg: var(--quickfix-bg);
+  --color-quickfix-text: var(--quickfix-text);
+  --font-sans: "Instrument Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-display: "Syne", "Instrument Sans", -apple-system, sans-serif;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  /* AuditPilot brand palette: warm cream canvas, near-black ink, a single
+     confident lime accent for score/brand/CTA moments — see the design
+     brief this was lifted from (dark "spotlight" panels + a lime accent
+     used for the overall score, pill buttons, and "good" status). */
+  --background: #faf9f5;
+  --foreground: #16181d;
+  --card: #ffffff;
+  --card-foreground: #16181d;
+  --popover: #ffffff;
+  --popover-foreground: #16181d;
+  --primary: oklch(85% 0.19 128);
+  --primary-foreground: #16181d;
+  --secondary: #f4f4f1;
+  --secondary-foreground: #16181d;
+  --muted: #f4f4f1;
+  --muted-foreground: #726e66;
+  --accent: #f4f4f1;
+  --accent-foreground: #16181d;
+  /* Severity hues (high/medium pills, left-border accents on issue cards) —
+     matched exactly to the approved 4A "Sidebar Console" comp (see
+     design_options/AuditPilot Results - 4A.dc.html). Reused as the generic
+     destructive/warning tokens since "high severity" and "error" share the
+     same red, and "medium severity" and "warning" share the same amber. */
+  --destructive: oklch(52% 0.17 22);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(85% 0.19 128);
+  --success-foreground: #16181d;
+  --warning: oklch(72% 0.17 65);
+  --warning-foreground: #ffffff;
+  --border: #e9e9e5;
+  --input: #e9e9e5;
+  --ring: oklch(85% 0.19 128);
+  /* "Spotlight" surface — used sparingly for emphasis moments (the overall
+     score tile, the top-priority callout), not as a whole-page dark mode. */
+  --ink: #16181d;
+  --ink-foreground: #f5f5f2;
+  --ink-muted: #8b8f86;
+
+  /* Status hues code a category's qualitative score band (good/needs-work/
+     poor) — distinct from severity above, since a "poor" performance score
+     and a "high" severity issue are different concepts that happen to
+     share the same red in this palette. -bar variants are the brighter
+     fill color used on progress bars; the plain variants are the darker,
+     more legible text-label color used on a light background. */
+  --status-good: oklch(52% 0.16 135);
+  --status-good-bar: oklch(85% 0.19 128);
+  --status-needs-work: oklch(60% 0.15 70);
+  --status-needs-work-bar: oklch(72% 0.16 70);
+  --status-poor: oklch(50% 0.16 22);
+  --status-poor-bar: oklch(52% 0.17 22);
+  /* Same three bands, brighter variants for legibility on the dark ink
+     sidebar/panels (score numbers in the Categories nav, "At a glance"
+     tiles) — a dark-background context needs a lighter color than the
+     white-background text variants above to keep sufficient contrast. */
+  --status-good-on-dark: oklch(85% 0.19 128);
+  --status-needs-work-on-dark: oklch(75% 0.15 70);
+  --status-poor-on-dark: oklch(68% 0.16 22);
+  --link: oklch(48% 0.15 135);
+  --quickfix-bg: oklch(96% 0.06 128);
+  --quickfix-text: oklch(45% 0.13 135);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --success: oklch(0.7 0.15 145);
+  --success-foreground: oklch(0.145 0 0);
+  --warning: oklch(0.8 0.17 60);
+  --warning-foreground: oklch(0.145 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Instrument Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+}
+
+@layer utilities {
+  /* Display face for headlines/scores — Syne, per the 4A comp's "dsp" class. */
+  .font-display {
+    font-family: "Syne", "Instrument Sans", -apple-system, sans-serif;
+  }
+
+  /* "Show more" / jump links — an underline that reveals left-to-right on
+     hover, per the 4A comp's ".link" class, instead of an always-on underline. */
+  .link {
+    position: relative;
+  }
+  .link::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 100%;
+    bottom: -1px;
+    height: 1px;
+    background: currentColor;
+    transition: right 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .link:hover::after {
+    right: 0;
+  }
+
+  /* Subtle pulsing glow on the primary CTA buttons on the homepage — per the
+     new comp's ".cta-pulse" class. */
+  .cta-pulse {
+    animation: cta-pulse 2.6s ease-in-out infinite;
+  }
+  @keyframes cta-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 oklch(85% 0.19 128 / 0.5);
+    }
+    50% {
+      box-shadow: 0 0 0 8px oklch(85% 0.19 128 / 0);
+    }
+  }
+}
+
+/*
+ * Print / PDF layout (AuditPilot results page).
+ *
+ * Most print-specific behavior lives inline as Tailwind `print:` utilities
+ * right where each component needs it (hiding buttons/toggles, forcing
+ * collapsed content open with `print:flex`/`print:block`, `break-inside-avoid`
+ * on cards and issue rows so they don't split mid-card across a page break).
+ * What's here is the handful of things utilities can't express: page
+ * margins, and stripping card drop-shadows that look like smudges once
+ * rasterized to paper.
+ */
+@media print {
+  @page {
+    size: auto;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    background: white !important;
+  }
+
+  [data-slot="card"] {
+    box-shadow: none !important;
+  }
+}
