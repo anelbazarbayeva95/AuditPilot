@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Eye, Wand2 } from "lucide-react"
+import { Eye } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { IssueDetailModal } from "@/components/audit/IssueDetailModal"
@@ -16,13 +16,11 @@ import type { Severity } from "@/types/audit"
  * paragraph by paragraph. The why-it-matters/recommended-fix explanation is
  * still here, just secondary — smaller, muted, below the evidence.
  *
- * The card stays compact; two explicit, equally-sized actions both open
- * IssueDetailModal with the full why/fix text, affected element, and
- * technical details — "Inspect Issue" opens it at the top, "Generate Fix"
- * opens it scrolled straight to the Recommended Fix section. Same real data
- * either way, just a different entry point depending on what the user
- * already knows they want. Severity/effort are plain status badges, never
- * styled to look like a third action.
+ * The card stays compact; one "Inspect Issue" action opens IssueDetailModal
+ * with the full why/fix text, affected element, and technical details — the
+ * report stays evidence-first rather than framed as something to trigger an
+ * action on. Severity/effort are plain status badges, never styled to look
+ * like a second action next to it.
  */
 export function IssueItem({
   id,
@@ -54,7 +52,7 @@ export function IssueItem({
   section?: string | null
   className?: string
 }) {
-  const [modalFocus, setModalFocus] = useState<"top" | "fix" | null>(null)
+  const [modalOpen, setModalOpen] = useState(false)
   const { whyItMatters, recommendedFix, affectedElement, technicalDetails, effort } = buildIssueCardContent(
     title,
     description,
@@ -132,27 +130,19 @@ export function IssueItem({
           </p>
         </div>
 
-        <div className="mt-1 flex flex-col gap-2 print:hidden sm:flex-row">
+        <div className="mt-1 print:hidden">
           <button
             type="button"
-            onClick={() => setModalFocus("top")}
-            className="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-full border px-4 text-sm font-semibold text-foreground/80 transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:flex-none"
+            onClick={() => setModalOpen(true)}
+            className="flex min-h-11 w-full items-center justify-center gap-1.5 rounded-full border px-4 text-sm font-semibold text-foreground/80 transition hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           >
             <Eye className="size-4" />
             Inspect Issue
           </button>
-          <button
-            type="button"
-            onClick={() => setModalFocus("fix")}
-            className="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-full bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:flex-none"
-          >
-            <Wand2 className="size-4" />
-            Generate Fix
-          </button>
         </div>
       </li>
 
-      {modalFocus && (
+      {modalOpen && (
         <IssueDetailModal
           title={title}
           severity={severity}
@@ -163,8 +153,7 @@ export function IssueItem({
           affectedElement={affectedElement}
           location={section}
           technicalDetails={technicalDetails}
-          focusSection={modalFocus}
-          onClose={() => setModalFocus(null)}
+          onClose={() => setModalOpen(false)}
         />
       )}
     </>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { Check, Copy, X } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
@@ -14,10 +14,9 @@ import type { Severity } from "@/types/audit"
  * barely-visible <details> disclosure. No new data: everything shown here
  * is the same buildIssueCardContent() output IssueItem already computes.
  *
- * Opened from one of two entry points on the card (see IssueItem.tsx):
- * "Inspect Issue" opens at the top; "Generate Fix" opens scrolled straight
- * to the Recommended Fix section via `focusSection="fix"`. Both show the
- * same real, already-computed data — there's no separate AI call here.
+ * Opened by the card's single "Inspect Issue" action (see IssueItem.tsx) —
+ * no separate AI call here, just the same real, already-computed data given
+ * full real estate.
  */
 export function IssueDetailModal({
   title,
@@ -29,7 +28,6 @@ export function IssueDetailModal({
   affectedElement,
   location,
   technicalDetails,
-  focusSection = "top",
   onClose,
 }: {
   title: string
@@ -42,11 +40,8 @@ export function IssueDetailModal({
   /** Nearest real landmark ("Header", "Navigation", "Footer", "Main content"), if known. */
   location?: string | null
   technicalDetails: string[]
-  /** Which part of the modal to scroll to right after it opens. */
-  focusSection?: "top" | "fix"
   onClose: () => void
 }) {
-  const fixSectionRef = useRef<HTMLDivElement>(null)
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -56,12 +51,6 @@ export function IssueDetailModal({
     document.addEventListener("keydown", handleKeyDown)
     return () => document.removeEventListener("keydown", handleKeyDown)
   }, [onClose])
-
-  useEffect(() => {
-    if (focusSection === "fix") {
-      fixSectionRef.current?.scrollIntoView({ block: "start" })
-    }
-  }, [focusSection])
 
   async function handleCopyRecommendation() {
     try {
@@ -143,7 +132,7 @@ export function IssueDetailModal({
             </div>
             <p className="mt-1.5 text-[15px] leading-relaxed text-foreground/80">{whyItMatters}</p>
           </div>
-          <div ref={fixSectionRef} className="scroll-mt-4 rounded-xl bg-quickfix-bg/40 p-3.5">
+          <div className="rounded-xl bg-quickfix-bg/40 p-3.5">
             <div className="flex items-center justify-between gap-2">
               <div className="text-[11px] font-semibold tracking-[0.1em] text-muted-foreground uppercase">
                 Recommended fix

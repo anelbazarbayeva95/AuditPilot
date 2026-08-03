@@ -121,9 +121,9 @@ function getRecommendedFix(title: string, displayDescription: string): string {
 
 export type EffortTier = "quick" | "moderate" | "involved"
 
-// "Quick win" (not "Quick fix") — reserves the word "fix" for the real
-// Generate Fix action button, so the effort badge never reads like a
-// second, competing action next to it.
+// "Quick win" (not "Quick fix") — reserves the word "fix" for the actual
+// Recommended Fix text, so the effort badge never reads like a competing
+// action next to it.
 export const EFFORT_LABEL: Record<EffortTier, string> = {
   quick: "Quick win",
   moderate: "Moderate effort",
