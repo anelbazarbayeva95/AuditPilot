@@ -129,9 +129,19 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# FRONTEND_ORIGINS is a comma-separated allowlist (e.g. the deployed Vercel URL) — unset falls
+# back to the local Vite dev server only, never "*", since allow_credentials=True combined with a
+# wildcard origin is both rejected by browsers and unsafe if it weren't.
+_frontend_origins_env = os.environ.get("FRONTEND_ORIGINS")
+if _frontend_origins_env:
+    _allowed_origins = [origin.strip() for origin in _frontend_origins_env.split(",") if origin.strip()]
+else:
+    _allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_logger.info("startup.cors_allowed_origins=%s", _allowed_origins)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict to frontend origin(s) before production
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
