@@ -2,6 +2,10 @@
 
 Agentic AI website auditing platform. Analyzes accessibility, performance, SEO, messaging quality, and visual design from a single URL.
 
+**Live preview:** [audit-pilot-ten.vercel.app](https://audit-pilot-ten.vercel.app/)
+
+![AuditPilot preview](docs/preview.png)
+
 ## Stack
 
 - **Frontend:** React + TypeScript + Vite + Tailwind + shadcn/ui + recharts
