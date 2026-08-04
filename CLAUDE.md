@@ -19,7 +19,9 @@ uvicorn main:app --reload             # http://localhost:8000
 
 Tests: `pytest -v` (or `pytest -q`). Run one file: `pytest tests/test_accessibility_agent.py`. Run one test: `pytest tests/test_accessibility_agent.py::TestEmptyButtons::test_empty_button_flagged`. `pytest.ini` sets `asyncio_mode = auto`, so `async def test_...` needs no `@pytest.mark.asyncio` decorator. The whole suite runs with fakes/stubs for Gemini (`FakeGeminiClient` pattern, see `tests/test_copy_agent.py`) and HTTP (`httpx.MockTransport`, see `tests/test_suggestions.py`) — no real network calls or API keys required.
 
-Requires `GEMINI_API_KEY` in `backend/.env` (copy from `.env.example`) only for agents that actually call Gemini at runtime (Copy, Visual, the suggestion-enrichment pass) — `GeminiClient` doesn't validate the key until the first real call, so importing/unit-testing any agent works without one.
+Requires `GEMINI_API_KEY` in `backend/.env` (copy from `.env.example`) only for agents that actually call Gemini at runtime (Copy, Visual, the suggestion-enrichment pass) — `GeminiClient` doesn't validate the key until the first real call, so importing/unit-testing any agent works without one. As of 2026, AI Studio issues `AQ.`-prefixed "Auth keys" rather than the older `AIza...` format; both work with this project's `google-genai`-based client.
+
+The Performance agent additionally shells out to `npx lighthouse` at runtime, so it needs Node.js/`npx` on `PATH` — this is separate from the Python venv and isn't installed by `pip install`. PDF export (`/report/pdf`) uses ReportLab, which is in `requirements.txt`.
 
 ### Frontend (`frontend/`)
 
@@ -48,6 +50,10 @@ The frontend only uses one path: `POST /report/jobs` (returns a job id immediate
 5. `report.py`'s `combine_report()` merges everything into one `StructuredAuditReport` (pure function, unit-testable without running any agent) — overall score, per-category scores, a flat cross-category `recommendations` list, and base64-encoded screenshots.
 
 `browser_defaults.py` centralizes the Playwright context fingerprint (desktop Chrome UA, `en-US` locale, 1280×900 viewport) shared by `scraper.py` and `screenshot.py` — Playwright's default headless identity gets outright blocked (HTTP 403) by some real sites, so both modules present the same realistic browser identity rather than the default headless one.
+
+`lighthouse_runner.py` shells out to `npx lighthouse`. Lighthouse's own chrome-launcher only auto-detects a *separately installed* system Chrome or an explicit `CHROME_PATH` — it has no awareness of Playwright's bundled Chromium even though that's usually the only Chromium binary present on a fresh checkout. When `CHROME_PATH` isn't already set, `run_lighthouse()` resolves Playwright's `chromium.executable_path` and passes it through `env`, so the Performance agent works out of the box without a separate Chrome install.
+
+`report.py`'s `combine_report()` output also feeds `pdf_report.py`, which builds the same content as a downloadable ReportLab PDF (`POST /report/pdf`) — Executive Summary, one section per category including Visual with an embedded screenshot, and a severity-sorted recommendations list.
 
 ### The "no fabrication" data model
 
