@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright
 
 from browser_defaults import DESKTOP_LOCALE, DESKTOP_USER_AGENT, DESKTOP_VIEWPORT
 from models.schemas import ButtonData, ImageData, InputData, LinkData, ScrapedPageData
+from url_safety import UnsafeURLError, ensure_public_url
 
 DEFAULT_TIMEOUT_MS = 30_000
 
@@ -93,8 +94,16 @@ async def scrape_website(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> Scra
 
     Raises:
         ScraperError: if the page cannot be reached, times out, returns an
-            HTTP error status, or fails to parse for any other reason.
+            HTTP error status, or fails to parse for any other reason. Also
+            raised (rather than a separate exception type) when the URL
+            resolves to a non-public address, so every existing caller's
+            error handling covers this without changes.
     """
+    try:
+        await ensure_public_url(url)
+    except UnsafeURLError as exc:
+        raise ScraperError(str(exc)) from exc
+
     browser = None
     try:
         async with async_playwright() as pw:
