@@ -46,6 +46,27 @@ def _chrome_path_set(monkeypatch):
     monkeypatch.setenv("CHROME_PATH", "/usr/bin/fake-chrome")
 
 
+async def test_chrome_flags_include_disable_dev_shm_usage(monkeypatch):
+    # Containerized/serverless hosts often cap /dev/shm well below what
+    # Chrome's renderer wants, which can crash mid-load and surface as
+    # Lighthouse's misleading CHROME_INTERSTITIAL_ERROR — regression test
+    # for the flag that avoids it.
+    captured_cmd = {}
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        with open(_output_path_from_cmd(cmd), "w", encoding="utf-8") as f:
+            json.dump(GOOD_REPORT, f)
+        return _FakeProcess(returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    await run_lighthouse("https://example.com")
+
+    chrome_flags_arg = next(arg for arg in captured_cmd["cmd"] if arg.startswith("--chrome-flags="))
+    assert "--disable-dev-shm-usage" in chrome_flags_arg
+
+
 async def test_success_reads_report_from_output_file(monkeypatch):
     async def fake_create_subprocess_exec(*cmd, **kwargs):
         with open(_output_path_from_cmd(cmd), "w", encoding="utf-8") as f:

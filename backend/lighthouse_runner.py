@@ -124,7 +124,14 @@ async def run_lighthouse(url: str) -> PerformanceMetrics:
         "npx", "--yes", "lighthouse", url,
         "--output=json", f"--output-path={output_path}", "--quiet",
         "--only-categories=performance",
-        '--chrome-flags=--headless=new --no-sandbox --disable-gpu',
+        # --disable-dev-shm-usage: containerized/serverless hosts commonly
+        # cap /dev/shm at 64MB, far below what Chrome's renderer wants for a
+        # real-world page. Without this, the renderer can crash mid-load,
+        # which Lighthouse's driver often surfaces as the misleading
+        # CHROME_INTERSTITIAL_ERROR ("Chrome prevented page load with an
+        # interstitial") rather than a clear crash message — this is the
+        # standard fix for Lighthouse/Puppeteer/Chrome-in-Docker deployments.
+        '--chrome-flags=--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage',
     ]
     try:
         try:
