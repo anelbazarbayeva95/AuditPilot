@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import logging
 import os
+import tempfile
 import time
 from typing import Any, Optional
 
@@ -32,6 +34,8 @@ class LighthouseError(Exception):
 # setups that rely on a system Chrome install are unaffected.
 _playwright_chrome_path_cache: dict[str, Optional[str]] = {}
 
+_CHROME_EXECUTABLE_NAMES = ("chrome", "chrome.exe", "Chromium", "headless_shell")
+
 
 async def _resolve_playwright_chrome_path() -> Optional[str]:
     if "path" in _playwright_chrome_path_cache:
@@ -45,11 +49,56 @@ async def _resolve_playwright_chrome_path() -> Optional[str]:
             candidate = pw.chromium.executable_path
             if candidate and os.path.exists(candidate):
                 path = candidate
+            else:
+                path = _find_installed_chromium(candidate)
     except Exception as exc:  # noqa: BLE001 - this is a best-effort fallback only
         logger.debug("lighthouse.chrome_path_fallback unavailable error=%s", exc)
 
+    if path is None:
+        logger.warning(
+            "lighthouse.chrome_path_fallback_failed — no usable Chromium executable found; "
+            "Performance audits will fail until CHROME_PATH is set or `playwright install "
+            "chromium` has been run with a browser build matching the installed `playwright` "
+            "package version."
+        )
+
     _playwright_chrome_path_cache["path"] = path
     return path
+
+
+def _find_installed_chromium(expected_candidate: Optional[str]) -> Optional[str]:
+    """Best-effort fallback for when Playwright's *exact expected* browser
+    revision path doesn't exist — e.g. the `playwright` pip package was
+    upgraded without re-running `playwright install chromium`, so the
+    revision baked into the package no longer matches what's on disk.
+    Rather than giving up, glob for any installed Chromium build under the
+    same browsers root (PLAYWRIGHT_BROWSERS_PATH, or the parent of the
+    expected path) and use whichever is found first.
+    """
+    root = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not root and expected_candidate:
+        # Layout is <root>/chromium-<rev>/<platform-specific-nested-path>/
+        # <executable> — nesting depth varies by OS (e.g. macOS's
+        # chromium-<rev>/chrome-mac/Chromium.app/Contents/MacOS/Chromium is
+        # deeper than Linux's chromium-<rev>/chrome-linux/chrome), so walk up
+        # from the candidate until we find the chromium-<rev> ancestor
+        # itself, rather than assuming a fixed number of path segments.
+        node = os.path.dirname(expected_candidate)
+        while node and node != os.path.dirname(node):
+            parent = os.path.dirname(node)
+            if os.path.basename(node).startswith("chromium"):
+                root = parent
+                break
+            node = parent
+    if not root or not os.path.isdir(root):
+        return None
+
+    for name in _CHROME_EXECUTABLE_NAMES:
+        pattern = os.path.join(root, "chromium*", "**", name)
+        for match in sorted(glob.glob(pattern, recursive=True)):
+            if os.path.isfile(match) and os.access(match, os.X_OK):
+                return match
+    return None
 
 
 async def run_lighthouse(url: str) -> PerformanceMetrics:
@@ -63,40 +112,62 @@ async def run_lighthouse(url: str) -> PerformanceMetrics:
             logger.info("lighthouse.chrome_path_fallback path=%s", fallback_path)
             env["CHROME_PATH"] = fallback_path
 
+    # Write the report to a file rather than reading it off stdout: `npx`
+    # can print its own noise to stdout ahead of Lighthouse's JSON (a
+    # first-run "need to install the following packages" banner, npm update
+    # notices, etc.), which silently breaks a direct json.loads(stdout).
+    # A file is immune to that regardless of what caused the noise.
+    fd, output_path = tempfile.mkstemp(suffix=".json", prefix="lighthouse-")
+    os.close(fd)
+
     cmd = [
         "npx", "--yes", "lighthouse", url,
-        "--output=json", "--quiet",
+        "--output=json", f"--output-path={output_path}", "--quiet",
         "--only-categories=performance",
-        '--chrome-flags=--headless=new --no-sandbox --disable-gpu',
+        # --disable-dev-shm-usage: containerized/serverless hosts commonly
+        # cap /dev/shm at 64MB, far below what Chrome's renderer wants for a
+        # real-world page. Without this, the renderer can crash mid-load,
+        # which Lighthouse's driver often surfaces as the misleading
+        # CHROME_INTERSTITIAL_ERROR ("Chrome prevented page load with an
+        # interstitial") rather than a clear crash message — this is the
+        # standard fix for Lighthouse/Puppeteer/Chrome-in-Docker deployments.
+        '--chrome-flags=--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage',
     ]
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=LIGHTHOUSE_TIMEOUT_S)
-    except asyncio.TimeoutError as exc:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=LIGHTHOUSE_TIMEOUT_S)
+        except asyncio.TimeoutError as exc:
+            duration = time.perf_counter() - started
+            logger.warning("lighthouse.failed url=%s duration=%.2fs error=timeout", url, duration)
+            raise LighthouseError(f"Lighthouse timed out auditing '{url}'") from exc
+        except OSError as exc:
+            duration = time.perf_counter() - started
+            logger.warning("lighthouse.failed url=%s duration=%.2fs error=%s", url, duration, exc)
+            raise LighthouseError(f"Failed to launch Lighthouse: {exc}") from exc
+
         duration = time.perf_counter() - started
-        logger.warning("lighthouse.failed url=%s duration=%.2fs error=timeout", url, duration)
-        raise LighthouseError(f"Lighthouse timed out auditing '{url}'") from exc
-    except OSError as exc:
-        duration = time.perf_counter() - started
-        logger.warning("lighthouse.failed url=%s duration=%.2fs error=%s", url, duration, exc)
-        raise LighthouseError(f"Failed to launch Lighthouse: {exc}") from exc
 
-    duration = time.perf_counter() - started
+        if proc.returncode != 0:
+            logger.warning(
+                "lighthouse.failed url=%s duration=%.2fs returncode=%s stderr=%s",
+                url, duration, proc.returncode, stderr.decode()[:500],
+            )
+            raise LighthouseError(f"Lighthouse exited {proc.returncode}: {stderr.decode()[:500]}")
 
-    if proc.returncode != 0:
-        logger.warning(
-            "lighthouse.failed url=%s duration=%.2fs returncode=%s stderr=%s",
-            url, duration, proc.returncode, stderr.decode()[:500],
-        )
-        raise LighthouseError(f"Lighthouse exited {proc.returncode}: {stderr.decode()[:500]}")
-
-    try:
-        report = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        logger.warning("lighthouse.failed url=%s duration=%.2fs error=invalid_json: %s", url, duration, exc)
-        raise LighthouseError(f"Lighthouse returned invalid JSON: {exc}") from exc
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("lighthouse.failed url=%s duration=%.2fs error=invalid_output: %s", url, duration, exc)
+            raise LighthouseError(f"Lighthouse produced no valid report: {exc}") from exc
+    finally:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
 
     metrics = _parse_report(report)
     logger.info(

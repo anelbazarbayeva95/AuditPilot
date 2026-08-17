@@ -27,6 +27,26 @@ def test_health_check(client):
     assert response.json()["status"] == "ok"
 
 
+class TestCors:
+    def test_allowed_origin_gets_cors_header(self, client):
+        response = client.get("/health", headers={"Origin": "http://localhost:5173"})
+        assert response.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+    def test_disallowed_origin_gets_no_cors_header(self, client):
+        response = client.get("/health", headers={"Origin": "https://evil.example"})
+        assert "access-control-allow-origin" not in response.headers
+
+    def test_credentials_not_allowed(self, client):
+        response = client.options(
+            "/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert "access-control-allow-credentials" not in response.headers
+
+
 class TestAuditScrapeEndpoint:
     def test_malformed_url_returns_422(self, client):
         response = client.post("/audit", json={"url": "not-a-url"})

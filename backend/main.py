@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 
 from dotenv import find_dotenv, load_dotenv
 
@@ -104,7 +105,28 @@ def _log_gemini_config() -> None:
     _logger.info("gemini_config.model=%s", DEFAULT_MODEL_NAME)
 
 
+def _log_lighthouse_config() -> None:
+    """Logs whether Node/npx is even on PATH at startup.
+
+    The Performance agent shells out to `npx lighthouse` at runtime — a
+    dependency separate from `pip install` that's easy to miss on a
+    deployment host provisioned for Python only. Without this check, a
+    missing Node install only shows up as a per-audit Lighthouse failure;
+    logging it once at startup makes a Node-less deployment obvious
+    immediately instead of being discovered one failed audit at a time.
+    """
+    npx_path = shutil.which("npx")
+    if npx_path:
+        _logger.info("lighthouse_config.npx_present=true lighthouse_config.npx_path=%s", npx_path)
+    else:
+        _logger.warning(
+            "lighthouse_config.npx_present=false — Performance Review will fail for every "
+            "audit until Node.js/npx is installed and on PATH."
+        )
+
+
 _log_gemini_config()
+_log_lighthouse_config()
 
 # Constructed once at import time — cheap to build (agents don't touch the
 # network or require GEMINI_API_KEY until a request actually needs Gemini).
@@ -129,10 +151,22 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# Comma-separated list of allowed frontend origins, e.g.
+# "http://localhost:5173,https://audit-pilot-ten.vercel.app". Defaults to the
+# local Vite dev server only — production deployments must set this
+# explicitly. The frontend never sends cookies/credentials (plain fetch, see
+# frontend/src/lib/api.ts), so allow_credentials stays off.
+_allowed_origins = [
+    origin.strip()
+    for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+_logger.info("startup.allowed_origins=%s", _allowed_origins)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # TODO: restrict to frontend origin(s) before production
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

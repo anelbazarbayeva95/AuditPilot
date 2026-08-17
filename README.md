@@ -98,6 +98,7 @@ All current tests use fakes/stubs for Playwright and Gemini, so no network acces
 | Variable | Purpose |
 |---|---|
 | `GEMINI_API_KEY` | Required for `CopyAgent` to actually call Gemini 2.5 Flash. Not required to import or unit-test the agent — `GeminiClient` only checks for it on the first real API call. As of 2026, keys from AI Studio are issued as `AQ.`-prefixed "Auth keys" rather than the older `AIza...` "Standard key" format; both work with this project's `google-genai`-based client. |
+| `ALLOWED_ORIGINS` | Comma-separated list of frontend origins allowed by CORS. Defaults to `http://localhost:5173`. Set this to your deployed frontend's real origin(s) in production. |
 
 ## Frontend setup
 
