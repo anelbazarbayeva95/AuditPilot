@@ -7,6 +7,10 @@ deliverable"* — is accurate, and its ranking is right: **credibility before de
 records what was verified in the code and the PDF binary, separates the feedback into what to act on
 as stated vs. what needs adjusting, and lays out the work in three shippable releases.
 
+> **Status:** Release 1 (§6) is implemented. Release 2 is blocked on the renderer decision in §4 —
+> ReportLab cannot produce a tagged PDF, so the tagging and typography work should follow that call
+> rather than be spent twice. Release 3 is not started.
+
 ---
 
 ## 1. Verified findings

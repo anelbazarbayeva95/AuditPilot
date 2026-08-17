@@ -39,12 +39,26 @@ from models.schemas import CategoryResult, Recommendation, ScrapedPageData
 
 logger = logging.getLogger(__name__)
 
-# Recommendation.title values these apply to — must match the `.replace("_",
-# " ").title()` output of AccessibilityCheck.MISSING_PAGE_TITLE / SEOCheck.MISSING_TITLE
-# and .MISSING_ALT_TEXT / .MISSING_IMAGE_ALT_TEXT (see agents/accessibility.py,
-# agents/seo.py).
-_TITLE_TITLES = {"Missing Title", "Missing Page Title"}
-_ALT_TEXT_TITLES = {"Missing Alt Text", "Missing Image Alt Text"}
+# Matched on `rule_id`, the stable per-check identifier — titles are editorial
+# and have been reworded once already, which would silently switch this whole
+# enrichment pass off. The title sets remain as a fallback for recommendations
+# built before `rule_id` existed.
+_TITLE_RULE_IDS = {"missing_title", "missing_page_title"}
+_ALT_TEXT_RULE_IDS = {"missing_alt_text", "missing_image_alt_text"}
+
+_TITLE_TITLES = {"Missing Title", "Missing Page Title", "Missing page title"}
+_ALT_TEXT_TITLES = {
+    "Missing Alt Text", "Missing Image Alt Text", "Missing alt text", "Missing image alt text",
+}
+
+
+def _is_title_finding(rec) -> bool:
+    return rec.rule_id in _TITLE_RULE_IDS if rec.rule_id else rec.title in _TITLE_TITLES
+
+
+def _is_alt_text_finding(rec) -> bool:
+    return rec.rule_id in _ALT_TEXT_RULE_IDS if rec.rule_id else rec.title in _ALT_TEXT_TITLES
+
 
 _MAX_IMAGE_SUGGESTIONS = 3
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024  # refuse to fetch/send anything larger than this
@@ -126,7 +140,7 @@ async def _suggest_alt_text(
 ) -> dict[str, str]:
     srcs: list[str] = []
     for rec in [*accessibility_result.recommendations, *seo_result.recommendations]:
-        if rec.title in _ALT_TEXT_TITLES and rec.context and rec.context not in srcs:
+        if _is_alt_text_finding(rec) and rec.context and rec.context not in srcs:
             srcs.append(rec.context)
     srcs = srcs[:_MAX_IMAGE_SUGGESTIONS]
 
@@ -188,9 +202,9 @@ def _apply_suggestions(
     changed = False
     for rec in result.recommendations:
         suggestion: Optional[str] = None
-        if title_suggestion and rec.title in _TITLE_TITLES:
+        if title_suggestion and _is_title_finding(rec):
             suggestion = title_suggestion
-        elif rec.title in _ALT_TEXT_TITLES and rec.context in alt_text_by_src:
+        elif _is_alt_text_finding(rec) and rec.context in alt_text_by_src:
             suggestion = alt_text_by_src[rec.context]
 
         if suggestion:

@@ -37,6 +37,65 @@ class Severity(str, Enum):
     INFO = "info"
 
 
+class ScoreStatus(str, Enum):
+    """Why a category has (or doesn't have) a score.
+
+    A score of `None` used to be ambiguous — it could mean the agent crashed,
+    the tool was unavailable, or the evidence was too poor to judge. Reports
+    have to be able to say which, because "insufficient evidence" is a
+    legitimate audit outcome and "the agent failed" is not the same claim.
+    """
+
+    SCORED = "scored"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    NOT_RUN = "not_run"
+
+
+class DetectionMethod(str, Enum):
+    """How a finding was produced — automated fact vs. model judgment.
+
+    Keeping these apart is the difference between "LCP measured 4820ms" and
+    "the hero feels unbalanced": both belong in a report, but they can't be
+    presented with the same authority.
+    """
+
+    AUTOMATED = "automated"
+    AI_GENERATED = "ai_generated"
+    MANUAL = "manual"
+
+
+class ImpactLevel(str, Enum):
+    """User/business impact of a finding, independent of its severity."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class EffortLevel(str, Enum):
+    """Roughly how much work the fix is."""
+
+    QUICK = "quick"
+    MODERATE = "moderate"
+    INVOLVED = "involved"
+
+
+class TimingBand(str, Enum):
+    """When the fix should be scheduled, derived from impact + effort + confidence."""
+
+    IMMEDIATE = "immediate"
+    NEXT_SPRINT = "next_sprint"
+    BACKLOG = "backlog"
+
+
+class CoverageMethod(str, Enum):
+    """How a category was assessed."""
+
+    AUTOMATED = "automated"
+    AI_ASSISTED = "ai_assisted"
+    NOT_RUN = "not_run"
+
+
 # ---------------------------------------------------------------------------
 # Requests
 # ---------------------------------------------------------------------------
@@ -71,6 +130,11 @@ class ImageData(BaseModel):
     # hadn't finished loading so naturalWidth/naturalHeight were 0).
     width: Optional[int] = None
     height: Optional[int] = None
+    dom_excerpt: Optional[str] = Field(
+        default=None,
+        description="Truncated real outerHTML of this element — the short DOM excerpt a "
+        "developer needs to recognize the element without trusting a fragile selector.",
+    )
     selector: Optional[str] = Field(
         default=None,
         description="CSS selector computed from real DOM structure (id if present, else a "
@@ -95,6 +159,20 @@ class ButtonData(BaseModel):
     id: Optional[str] = None
     class_name: Optional[str] = None
     button_type: Optional[str] = None
+    accessible_name: Optional[str] = Field(
+        default=None,
+        description="Accessible name resolved in real precedence order (aria-labelledby > "
+        "aria-label > text content > value > title). Empty string means the element genuinely "
+        "has no accessible name; None means the scraper didn't compute one (older payloads).",
+    )
+    name_source: Optional[str] = Field(
+        default=None,
+        description="Which mechanism supplied `accessible_name` — 'aria-labelledby', "
+        "'aria-label', 'content', 'value', 'title', or 'none'.",
+    )
+    dom_excerpt: Optional[str] = Field(
+        default=None, description="Truncated real outerHTML of this element."
+    )
     selector: Optional[str] = Field(
         default=None,
         description="CSS selector computed from real DOM structure (id if present, else a "
@@ -130,6 +208,12 @@ class ScrapedPageData(BaseModel):
     """Structured content extracted from a single rendered page."""
 
     url: str
+    final_url: Optional[str] = Field(
+        default=None, description="URL actually landed on after redirects, if known."
+    )
+    http_status: Optional[int] = Field(
+        default=None, description="HTTP status of the main document response, if known."
+    )
     title: Optional[str] = None
     meta_description: Optional[str] = None
     h1_tags: list[str] = Field(default_factory=list)
@@ -172,6 +256,20 @@ class AccessibilityFinding(BaseModel):
     )
     section: Optional[str] = Field(
         default=None, description="Nearest real landmark (Header/Navigation/Footer/Main content), if known."
+    )
+    wcag_criterion: Optional[str] = Field(
+        default=None,
+        description="The WCAG success criterion this check maps to, e.g. "
+        "'WCAG 4.1.2 — Name, Role, Value'. Set from a fixed per-check map, never inferred.",
+    )
+    dom_excerpt: Optional[str] = Field(
+        default=None, description="Truncated real outerHTML of the offending element, if element-level."
+    )
+    accessible_name_computation: Optional[str] = Field(
+        default=None,
+        description="Plain-language trace of how the accessible name resolved to nothing, e.g. "
+        "'no aria-labelledby, no aria-label, no text content, no value, no title'. Only set for "
+        "name-related checks, and derived entirely from attributes actually captured.",
     )
     ai_suggestion: Optional[str] = Field(
         default=None,
@@ -303,6 +401,47 @@ class PerformanceMetrics(BaseModel):
     lcp_ms: Optional[float] = None
     cls: Optional[float] = None
     inp_ms: Optional[float] = None
+    fcp_ms: Optional[float] = None
+    tbt_ms: Optional[float] = None
+    speed_index_ms: Optional[float] = None
+
+
+class PerformanceRunConfig(BaseModel):
+    """The conditions a performance score was measured under.
+
+    A Lighthouse number is meaningless without this: the same page scores very
+    differently on mobile-emulated 4G than on an unthrottled desktop run, so a
+    report that prints the score without the conditions isn't reproducible.
+    Every field is read back out of the Lighthouse report itself.
+    """
+
+    lighthouse_version: Optional[str] = None
+    form_factor: Optional[str] = Field(default=None, description="'mobile' or 'desktop'")
+    screen_emulation: Optional[str] = Field(default=None, description="e.g. '1350x940 @1x'")
+    throttling: Optional[str] = Field(
+        default=None, description="Human-readable throttling summary, e.g. 'simulated 10240kbps down, 4x CPU'"
+    )
+    runs: int = Field(default=1, description="How many Lighthouse runs the reported metrics come from.")
+    fetch_time: Optional[str] = None
+    final_url: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class PerformanceOpportunity(BaseModel):
+    """One Lighthouse opportunity/diagnostic, with the real resources behind it.
+
+    This is what turns "audit render-blocking resources" into "defer
+    main.css (48 KB, ~320 ms)" — every value comes from the Lighthouse audit's
+    own `details.items`, never estimated here.
+    """
+
+    audit_id: str
+    title: str
+    savings_ms: Optional[float] = None
+    savings_bytes: Optional[int] = None
+    resources: list[str] = Field(
+        default_factory=list, description="Real resource URLs named by the audit, largest first."
+    )
 
 
 class PerformanceFinding(BaseModel):
@@ -310,14 +449,18 @@ class PerformanceFinding(BaseModel):
     severity: Severity
     message: str
     context: Optional[str] = None
+    measured_value: Optional[str] = Field(default=None, description="e.g. '4820 ms'")
+    threshold: Optional[str] = Field(default=None, description="e.g. 'good is <= 2500 ms'")
 
 
 class PerformanceResult(BaseModel):
-    """Output of the PerformanceAgent: {score, findings, metrics}."""
+    """Output of the PerformanceAgent: {score, findings, metrics, run_config, opportunities}."""
 
     score: Optional[float] = Field(default=None, ge=0, le=100)
     findings: list[PerformanceFinding] = Field(default_factory=list)
     metrics: PerformanceMetrics
+    run_config: Optional[PerformanceRunConfig] = None
+    opportunities: list[PerformanceOpportunity] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +487,38 @@ class VisualInsight(BaseModel):
     )
 
 
+class ScreenshotQuality(BaseModel):
+    """Whether a captured screenshot is actually usable as visual evidence.
+
+    A headless capture can succeed at the protocol level and still be a mostly
+    blank page — lazy-loaded hero media that never fired, fonts that never
+    resolved, a consent overlay that swallowed the layout. Evaluating such a
+    render as if it were the real page is how a report ends up describing a
+    headline that isn't in its own screenshot, so the pipeline measures the
+    render and refuses to judge it when it doesn't hold up.
+    """
+
+    status: str = Field(description="'ok', 'degraded', or 'unknown' (couldn't be measured).")
+    dominant_color_pct: Optional[float] = Field(
+        default=None, description="Share of pixels that are the single most common color, 0-100."
+    )
+    uniform_row_pct: Optional[float] = Field(
+        default=None, description="Share of rows that are >99% a single color, 0-100."
+    )
+    content_top_pct: Optional[float] = Field(
+        default=None,
+        description="How far down the image the first content-bearing row appears, 0-100. A high "
+        "value means the top of the page rendered empty.",
+    )
+    reason: Optional[str] = Field(
+        default=None, description="Why the render was judged degraded, in plain language."
+    )
+
+    @property
+    def is_degraded(self) -> bool:
+        return self.status == "degraded"
+
+
 class VisualResult(BaseModel):
     """Output of the VisualAgent: strengths, weaknesses, recommendations from the screenshots."""
 
@@ -361,6 +536,30 @@ class VisualResult(BaseModel):
 # ---------------------------------------------------------------------------
 # Shared building blocks
 # ---------------------------------------------------------------------------
+
+class CategoryCoverage(BaseModel):
+    """What a category actually tested — and, just as importantly, what it didn't.
+
+    A score is only interpretable next to its scope: "100/100" across six
+    automated checks is a different claim from "100/100, SEO is fine". Every
+    category publishes this so the report can state its own limits instead of
+    implying completeness it never had.
+    """
+
+    checks_run: list[str] = Field(default_factory=list)
+    checks_not_covered: list[str] = Field(default_factory=list)
+    method: CoverageMethod = CoverageMethod.AUTOMATED
+    notes: Optional[str] = None
+
+
+class Evidence(BaseModel):
+    """The raw observation behind a finding, so a reader can check the work."""
+
+    dom_excerpt: Optional[str] = None
+    accessible_name_computation: Optional[str] = None
+    measured_value: Optional[str] = Field(default=None, description="e.g. '4820 ms', '0.31'")
+    threshold: Optional[str] = Field(default=None, description="e.g. 'good is <= 2500 ms'")
+
 
 class Recommendation(BaseModel):
     """A single actionable recommendation produced by an agent."""
@@ -387,6 +586,36 @@ class Recommendation(BaseModel):
         "text) — always a suggestion, never asserted as a detected fact. None if generation "
         "wasn't attempted or failed.",
     )
+    # -- provenance and planning fields -------------------------------------
+    # All optional and None-by-default, like every other evidence field here:
+    # absent means "not determined for this finding", never a plausible guess.
+    wcag_criterion: Optional[str] = Field(
+        default=None, description="WCAG success criterion, for accessibility findings."
+    )
+    rule_id: Optional[str] = Field(
+        default=None, description="Stable identifier of the check that produced this finding."
+    )
+    detection: Optional[DetectionMethod] = Field(
+        default=None, description="Automated measurement, model judgment, or manual observation."
+    )
+    confidence: Optional[ConfidenceLevel] = Field(
+        default=None, description="How certain this finding is. Deterministic checks are 'high'."
+    )
+    impact: Optional[ImpactLevel] = None
+    effort: Optional[EffortLevel] = None
+    timing: Optional[TimingBand] = None
+    occurrences: Optional[int] = Field(
+        default=None, description="How many distinct elements this finding covers, once grouped."
+    )
+    validation: Optional[str] = Field(
+        default=None, description="How to verify the fix actually landed."
+    )
+    owner: Optional[str] = Field(
+        default=None,
+        description="Team/person responsible. Only ever set from caller-supplied configuration — "
+        "AuditPilot has no way to know who owns a component and will not guess one.",
+    )
+    evidence: Optional[Evidence] = None
 
 
 class CategoryResult(BaseModel):
@@ -396,6 +625,17 @@ class CategoryResult(BaseModel):
     score: Optional[float] = Field(
         default=None, ge=0, le=100, description="0-100 score for this category"
     )
+    score_status: ScoreStatus = Field(
+        default=ScoreStatus.SCORED,
+        description="Whether `score` is a real score, or absent because the evidence was "
+        "insufficient / the category never ran.",
+    )
+    score_explanation: Optional[str] = Field(
+        default=None,
+        description="The arithmetic behind `score`, in one line — e.g. '100 - (7 x 10 for empty "
+        "buttons, capped at 30) = 70'. Lets a reader reproduce the number instead of trusting it.",
+    )
+    coverage: Optional[CategoryCoverage] = None
     summary: Optional[str] = None
     recommendations: list[Recommendation] = Field(default_factory=list)
     raw_data: Optional[dict] = Field(
@@ -454,6 +694,33 @@ class PdfReportRequest(BaseModel):
 # Structured report (Milestone 9 — combines all four agents)
 # ---------------------------------------------------------------------------
 
+class RunContext(BaseModel):
+    """How this audit was produced — rendered as the report's Methodology section.
+
+    Without this, a score is an assertion. With it, a reader can reproduce the
+    run or explain the number away: a mobile-emulated, throttled Lighthouse
+    score sitting next to a desktop screenshot is a very different result from
+    what it looks like undisclosed.
+    """
+
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    requested_url: str
+    final_url: Optional[str] = None
+    http_status: Optional[int] = None
+    viewport: Optional[str] = Field(default=None, description="e.g. '1280x900'")
+    user_agent: Optional[str] = None
+    scraper_wait_until: Optional[str] = None
+    wcag_target: str = "WCAG 2.2 AA"
+    report_version: str = "1.0"
+    performance_run: Optional[PerformanceRunConfig] = None
+    scope_limitations: list[str] = Field(
+        default_factory=list,
+        description="Plain-language limits of this audit (single URL, single run, no "
+        "authenticated states, automated checks only, ...).",
+    )
+
+
 class ReportSummary(BaseModel):
     """Top-level rollup: overall score, per-category scores, issue counts by severity."""
 
@@ -461,6 +728,19 @@ class ReportSummary(BaseModel):
     category_scores: dict[str, Optional[float]] = Field(default_factory=dict)
     issue_counts: dict[str, int] = Field(
         default_factory=dict, description="Recommendation count keyed by severity, e.g. {'high': 3}"
+    )
+    weights: dict[str, float] = Field(
+        default_factory=dict,
+        description="Weight each category contributed to `overall_score`, renormalized over the "
+        "categories that actually produced one.",
+    )
+    excluded_categories: dict[str, str] = Field(
+        default_factory=dict,
+        description="Categories left out of `overall_score`, mapped to why — so an incomplete "
+        "audit reads as incomplete instead of quietly averaging over a smaller set.",
+    )
+    score_explanation: Optional[str] = Field(
+        default=None, description="How `overall_score` was computed, in one line."
     )
 
 
@@ -490,6 +770,15 @@ class StructuredAuditReport(BaseModel):
     )
     screenshot_viewport_base64: Optional[str] = Field(
         default=None, description="Above-the-fold viewport screenshot PNG, base64-encoded."
+    )
+    screenshot_quality: Optional[ScreenshotQuality] = Field(
+        default=None,
+        description="Measured usability of the captured render. A 'degraded' result is disclosed "
+        "wherever the screenshot appears, and suppresses visual scoring rather than being "
+        "evaluated as a successful render.",
+    )
+    run_context: Optional[RunContext] = Field(
+        default=None, description="Methodology: how, when, and under what conditions this ran."
     )
 
 

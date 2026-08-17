@@ -17,6 +17,9 @@ from models.schemas import (
     ButtonData,
     ImageData,
     InputData,
+    ConfidenceLevel,
+    CoverageMethod,
+    DetectionMethod,
     ScrapedPageData,
     Severity,
 )
@@ -291,3 +294,148 @@ class TestAnalyzeWrapper:
     async def test_analyze_raises_on_missing_page_data(self, agent):
         with pytest.raises(ValueError):
             await agent.analyze("https://example.com", {})
+
+
+# ---------------------------------------------------------------------------
+# Evidence, standards mapping, and de-duplication
+# ---------------------------------------------------------------------------
+
+class TestWcagMapping:
+    async def test_every_finding_cites_a_wcag_criterion(self, agent):
+        """A report that grades accessibility has to say what it graded against."""
+        page = make_page(
+            title=None,
+            h1_tags=["A", "B"],
+            images=[ImageData(src="logo.png", alt=None)],
+            buttons=[ButtonData(text="")],
+            inputs=[InputData(type="text", name="email", has_label=False)],
+        )
+        result = agent.run_checks(page)
+
+        assert len(result.findings) == 5
+        for finding in result.findings:
+            assert finding.wcag_criterion is not None
+            assert finding.wcag_criterion.startswith("WCAG ")
+
+    async def test_criterion_reaches_the_recommendation(self, agent):
+        page = make_page(buttons=[ButtonData(text="")])
+        category_result = await agent.analyze("https://example.com", {"page_data": page})
+
+        assert category_result.recommendations[0].wcag_criterion == (
+            "WCAG 4.1.2 — Name, Role, Value (Level A)"
+        )
+
+
+class TestAccessibleNameResolution:
+    def test_uses_the_scrapers_resolved_name(self, agent):
+        """aria-labelledby and title give a real name; the old text-only check missed both."""
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="Close dialog", name_source="aria-labelledby"),
+            ButtonData(text="", accessible_name="Search", name_source="title"),
+        ])
+
+        assert agent.run_checks(page).findings == []
+
+    def test_empty_resolved_name_is_still_flagged(self, agent):
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="", name_source="none", selector="#buy"),
+        ])
+        findings = agent.run_checks(page).findings
+
+        assert len(findings) == 1
+        assert findings[0].check == AccessibilityCheck.EMPTY_BUTTON
+
+    def test_falls_back_to_text_when_name_was_not_computed(self, agent):
+        """Payloads captured before accessible_name existed must still work."""
+        page = make_page(buttons=[ButtonData(text="")])
+
+        assert len(agent.run_checks(page).findings) == 1
+
+    def test_finding_explains_how_the_name_resolved_to_nothing(self, agent):
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="", name_source="none", selector="#buy"),
+        ])
+        finding = agent.run_checks(page).findings[0]
+
+        assert "aria-labelledby" in finding.accessible_name_computation
+        assert "accessible name is empty" in finding.accessible_name_computation
+
+    def test_dom_excerpt_is_carried_as_evidence(self, agent):
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="", selector="#buy",
+                       dom_excerpt='<button id="buy"><svg/></button>'),
+        ])
+        finding = agent.run_checks(page).findings[0]
+
+        assert finding.dom_excerpt == '<button id="buy"><svg/></button>'
+
+
+class TestDeduplication:
+    def test_distinct_elements_are_all_kept(self, agent):
+        """Seven nameless buttons are seven real problems, not one."""
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="", selector=f"#b{i}") for i in range(7)
+        ])
+
+        assert len(agent.run_checks(page).findings) == 7
+
+    def test_same_element_reported_once(self, agent):
+        """A [role=button] wrapping a <button> resolves to one selector, not two findings."""
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="", selector="#same"),
+            ButtonData(text="", accessible_name="", selector="#same"),
+        ])
+
+        assert len(agent.run_checks(page).findings) == 1
+
+    def test_page_level_findings_are_never_merged_away(self, agent):
+        page = make_page(title=None, h1_tags=["A", "B"])
+        checks = [f.check for f in agent.run_checks(page).findings]
+
+        assert AccessibilityCheck.MISSING_PAGE_TITLE in checks
+        assert AccessibilityCheck.MULTIPLE_H1 in checks
+
+
+class TestCoverageAndProvenance:
+    async def test_coverage_lists_what_was_and_was_not_tested(self, agent):
+        category_result = await agent.analyze(
+            "https://example.com", {"page_data": make_page()}
+        )
+        coverage = category_result.coverage
+
+        assert coverage is not None
+        assert len(coverage.checks_run) == len(AccessibilityCheck)
+        assert "Color contrast ratios" in coverage.checks_not_covered
+        assert coverage.method is CoverageMethod.AUTOMATED
+
+    async def test_findings_are_marked_as_automated_and_certain(self, agent):
+        page = make_page(buttons=[ButtonData(text="", accessible_name="")])
+        rec = (await agent.analyze("https://example.com", {"page_data": page})).recommendations[0]
+
+        assert rec.detection is DetectionMethod.AUTOMATED
+        assert rec.confidence is ConfidenceLevel.HIGH
+        assert rec.rule_id == "empty_button"
+
+    async def test_score_explanation_shows_the_arithmetic(self, agent):
+        page = make_page(buttons=[
+            ButtonData(text="", accessible_name="", selector=f"#b{i}") for i in range(7)
+        ])
+        category_result = await agent.analyze("https://example.com", {"page_data": page})
+
+        assert category_result.score == 70.0
+        assert "= 70." in category_result.score_explanation
+
+    async def test_summary_states_the_tested_scope(self, agent):
+        """"No issues" must not read as "accessibility is fine"."""
+        category_result = await agent.analyze(
+            "https://example.com", {"page_data": make_page()}
+        )
+
+        assert "5 automated checks" in category_result.summary
+        assert "issue(s)" not in category_result.summary
+
+    async def test_summary_pluralizes_properly(self, agent):
+        page = make_page(buttons=[ButtonData(text="", accessible_name="")])
+        summary = (await agent.analyze("https://example.com", {"page_data": page})).summary
+
+        assert "1 accessibility issue " in summary

@@ -8,6 +8,7 @@ import {
   compactSeverityLabel,
   CURRENT_STATE_BY_TITLE,
   FIX_EXPLANATION_BY_TITLE,
+  legacyTitleKey,
   occurrenceElement,
   WCAG_REFERENCE_BY_TITLE,
 } from "@/lib/issueText"
@@ -23,10 +24,10 @@ const FOCUSABLE_SELECTOR =
  * element, the recommended fix (shown immediately, no separate "generate"
  * step), the WCAG reference (only when we actually have one) — lives here.
  *
- * Evidence deliberately has no fabricated "Affected HTML" block: the scraper
- * only ever captures button text/image src/field name, never outerHTML or
- * real CSS selectors, so showing invented markup would misrepresent what
- * AuditPilot actually inspected.
+ * Evidence deliberately has no fabricated "Affected HTML" block — everything
+ * shown is captured off the live DOM. The backend now also captures a real
+ * `evidence.dom_excerpt` per element-level finding; surfacing it here is
+ * pending (see docs/report-quality-action-plan.md, W8).
  */
 export function FindingDrawer({
   title,
@@ -59,8 +60,11 @@ export function FindingDrawer({
   const active = occurrences[activeIndex] ?? occurrences[0]
   const { whyItMatters, recommendedFix } = buildIssueCardContent(title, active.description, pageUrl)
   const element = occurrenceElement(active)
-  const wcagReference = WCAG_REFERENCE_BY_TITLE[title]
-  const fixExplanation = FIX_EXPLANATION_BY_TITLE[title]
+  // Prefer the criterion the backend attached to this finding — it's the same
+  // map the PDF cites, so the two can't drift. The local table stays as the
+  // fallback for payloads from before the backend carried it.
+  const wcagReference = active.wcag_criterion ?? WCAG_REFERENCE_BY_TITLE[legacyTitleKey(title)]
+  const fixExplanation = FIX_EXPLANATION_BY_TITLE[legacyTitleKey(title)]
   const isGroup = occurrences.length > 1
   // Real, DOM-computed evidence — only shown when the scraper actually found
   // it, never invented. `element` (occurrenceElement) stays as the plain-
@@ -69,7 +73,7 @@ export function FindingDrawer({
   const location = active.section
   const selector = active.selector
   const aiSuggestion = active.ai_suggestion
-  const currentState = CURRENT_STATE_BY_TITLE[title]
+  const currentState = CURRENT_STATE_BY_TITLE[legacyTitleKey(title)]
 
   useEffect(() => {
     previousFocusRef.current = document.activeElement as HTMLElement | null

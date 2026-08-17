@@ -21,10 +21,16 @@ from __future__ import annotations
 from typing import Any, Union
 
 from agents.base import BaseAgent
-from agents.scoring import score_from_findings
+from agents.prioritization import prioritize
+from agents.scoring import score_with_explanation
+from labels import humanize, normalize_page_text, pluralize
 from models.schemas import (
     AuditCategory,
+    CategoryCoverage,
     CategoryResult,
+    ConfidenceLevel,
+    CoverageMethod,
+    DetectionMethod,
     Recommendation,
     ScrapedPageData,
     SEOCheck,
@@ -35,6 +41,22 @@ from models.schemas import (
 
 # Open Graph tags every page should have for clean link previews / social sharing.
 _REQUIRED_OG_TAGS = ("og:title", "og:description", "og:image")
+
+# What these six checks do not look at. Without this list a clean run reads as
+# "SEO is fine", which six on-page checks cannot establish — technical SEO,
+# indexability, and structured data are all untested here.
+SEO_NOT_COVERED = [
+    "Canonical URL and duplicate-content signals",
+    "robots.txt and meta robots directives",
+    "HTTP status codes and redirect chains",
+    "XML sitemap presence and validity",
+    "Structured data / schema.org markup",
+    "Indexability and crawl budget",
+    "Internal linking and anchor text",
+    "Mobile rendering and viewport configuration",
+    "Title and meta-description length limits",
+    "Page speed as a ranking signal (see Performance)",
+]
 
 
 class SEOAgent(BaseAgent):
@@ -48,10 +70,13 @@ class SEOAgent(BaseAgent):
         """
         page_data = _coerce_page_data(context.get("page_data"))
         result = self.run_checks(page_data)
+        _, explanation = score_with_explanation(result.findings)
 
         return CategoryResult(
             category=self.category,
             score=result.score,
+            score_explanation=explanation,
+            coverage=coverage(),
             summary=_summarize(result),
             recommendations=[_finding_to_recommendation(f) for f in result.findings],
             raw_data=result.model_dump(),
@@ -67,7 +92,7 @@ class SEOAgent(BaseAgent):
         findings.extend(self._check_open_graph_tags(page_data))
         findings.extend(self._check_image_alt_text(page_data))
 
-        score = score_from_findings(findings)
+        score, _ = score_with_explanation(findings)
         return SEOResult(score=score, findings=findings)
 
     # -- individual checks --------------------------------------------------
@@ -108,13 +133,14 @@ class SEOAgent(BaseAgent):
                 )
             ]
         if count > 1:
-            preview = _h1_preview(page_data.h1_tags)
+            headings = [h for h in (normalize_page_text(t) for t in page_data.h1_tags) if h]
+            preview = _h1_preview(headings)
             return [
                 SEOFinding(
                     check=SEOCheck.MULTIPLE_H1,
                     severity=Severity.MEDIUM,
                     message=f"Page has {count} <h1> tags{preview}; a single <h1> is recommended for SEO.",
-                    context=", ".join(page_data.h1_tags[:5]),
+                    context=", ".join(headings[:5]),
                 )
             ]
         return []
@@ -171,22 +197,50 @@ def _h1_preview(h1_tags: list[str]) -> str:
     return f" (e.g. {quoted})"
 
 
+def coverage() -> CategoryCoverage:
+    """The on-page checks this agent runs, and the SEO surface it doesn't reach."""
+    return CategoryCoverage(
+        checks_run=[humanize(check) for check in SEOCheck],
+        checks_not_covered=list(SEO_NOT_COVERED),
+        method=CoverageMethod.AUTOMATED,
+        notes=(
+            "On-page checks against the rendered DOM of a single URL. Technical SEO (crawling, "
+            "indexing, structured data) is out of scope for this run."
+        ),
+    )
+
+
 def _summarize(result: SEOResult) -> str:
+    checks = len(SEOCheck)
     if not result.findings:
-        return "No SEO issues detected."
-    return f"{len(result.findings)} SEO issue(s) found. Score: {result.score:.0f}/100."
+        # "No SEO issues detected" is a claim six on-page checks can't support.
+        # Say exactly what was tested instead, and point at what wasn't.
+        return (
+            f"No issues found across the {pluralize(checks, 'on-page check')} performed. "
+            f"{pluralize(len(SEO_NOT_COVERED), 'further SEO area')} were not tested — "
+            "see Methodology."
+        )
+    return (
+        f"{pluralize(len(result.findings), 'SEO issue')} found across the "
+        f"{pluralize(checks, 'on-page check')} performed."
+    )
 
 
 def _finding_to_recommendation(finding: SEOFinding) -> Recommendation:
-    return Recommendation(
-        title=finding.check.value.replace("_", " ").title(),
-        description=finding.message,
-        severity=finding.severity,
-        category=AuditCategory.SEO,
-        context=finding.context,
-        selector=finding.selector,
-        section=finding.section,
-        ai_suggestion=finding.ai_suggestion,
+    return prioritize(
+        Recommendation(
+            title=humanize(finding.check),
+            description=finding.message,
+            severity=finding.severity,
+            category=AuditCategory.SEO,
+            context=finding.context,
+            selector=finding.selector,
+            section=finding.section,
+            ai_suggestion=finding.ai_suggestion,
+            rule_id=finding.check.value,
+            detection=DetectionMethod.AUTOMATED,
+            confidence=ConfidenceLevel.HIGH,
+        )
     )
 
 

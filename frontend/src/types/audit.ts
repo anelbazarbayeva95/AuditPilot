@@ -22,9 +22,38 @@ export type VisualDimension =
   | "layout_issues"
   | "contrast_problems"
 
-/** Gemini's self-reported certainty in one Copy/Visual insight. Never shown for
- * rule-based Accessibility/SEO/Performance findings — those are deterministic. */
+/** Gemini's self-reported certainty in one Copy/Visual insight. Rule-based
+ * Accessibility/SEO/Performance findings report "high" — they're deterministic. */
 export type ConfidenceLevel = "high" | "medium" | "low"
+
+/** Why a category has (or doesn't have) a score. "insufficient_evidence" means
+ * the audit declined to judge — e.g. the page render was incomplete — which is
+ * a different claim from the agent having failed. */
+export type ScoreStatus = "scored" | "insufficient_evidence" | "not_run"
+
+/** Whether a finding is a measurement or a model judgment. */
+export type DetectionMethod = "automated" | "ai_generated" | "manual"
+
+export type ImpactLevel = "high" | "medium" | "low"
+export type EffortLevel = "quick" | "moderate" | "involved"
+export type TimingBand = "immediate" | "next_sprint" | "backlog"
+export type CoverageMethod = "automated" | "ai_assisted" | "not_run"
+
+/** What a category tested, and what it explicitly did not. */
+export interface CategoryCoverage {
+  checks_run: string[]
+  checks_not_covered: string[]
+  method: CoverageMethod
+  notes?: string | null
+}
+
+/** The raw observation behind a finding. */
+export interface Evidence {
+  dom_excerpt?: string | null
+  accessible_name_computation?: string | null
+  measured_value?: string | null
+  threshold?: string | null
+}
 
 export interface Recommendation {
   title: string
@@ -47,6 +76,25 @@ export interface Recommendation {
    * suggestion to review, never asserted as a detected fact — null if
    * generation wasn't attempted or failed for this finding. */
   ai_suggestion?: string | null
+  /** WCAG success criterion, for accessibility findings — e.g.
+   * "WCAG 4.1.2 — Name, Role, Value (Level A)". */
+  wcag_criterion?: string | null
+  /** Stable identifier of the check behind this finding (`empty_button`,
+   * `slow_lcp`). Prefer this over `title` when keying lookups — titles are
+   * editorial and can be reworded. */
+  rule_id?: string | null
+  detection?: DetectionMethod | null
+  confidence?: ConfidenceLevel | null
+  impact?: ImpactLevel | null
+  effort?: EffortLevel | null
+  timing?: TimingBand | null
+  /** How many distinct elements this finding covers, once grouped. */
+  occurrences?: number | null
+  /** How to verify the fix landed. */
+  validation?: string | null
+  /** Only ever set from caller-supplied configuration — never inferred. */
+  owner?: string | null
+  evidence?: Evidence | null
 }
 
 /** A single strength/weakness/recommendation from CopyAgent, tied to one dimension. */
@@ -95,6 +143,11 @@ export interface RuleRawData {
 export interface CategoryResult {
   category: AuditCategory
   score: number | null
+  /** Defaults to "scored" on older payloads. */
+  score_status?: ScoreStatus
+  /** The arithmetic behind `score`, in one line. */
+  score_explanation?: string | null
+  coverage?: CategoryCoverage | null
   summary: string | null
   recommendations: Recommendation[]
   raw_data: RuleRawData | CopyRawData | VisualRawData | Record<string, unknown> | null
@@ -105,6 +158,49 @@ export interface ReportSummary {
   overall_score: number | null
   category_scores: Record<string, number | null>
   issue_counts: Record<string, number>
+  /** Weight each category contributed, renormalized over those that scored. */
+  weights?: Record<string, number>
+  /** Categories left out of `overall_score`, mapped to why. */
+  excluded_categories?: Record<string, string>
+  score_explanation?: string | null
+}
+
+/** Measured usability of the captured render. A "degraded" status means the
+ * screenshot documents a failed capture, not the page — the backend skips
+ * visual scoring in that case, and the UI must not present it as the design. */
+export interface ScreenshotQuality {
+  status: "ok" | "degraded" | "unknown"
+  dominant_color_pct?: number | null
+  uniform_row_pct?: number | null
+  content_top_pct?: number | null
+  reason?: string | null
+}
+
+/** How the audit was produced — the report's methodology. */
+export interface PerformanceRunConfig {
+  lighthouse_version?: string | null
+  form_factor?: string | null
+  screen_emulation?: string | null
+  throttling?: string | null
+  runs: number
+  fetch_time?: string | null
+  final_url?: string | null
+  user_agent?: string | null
+}
+
+export interface RunContext {
+  started_at: string
+  finished_at?: string | null
+  requested_url: string
+  final_url?: string | null
+  http_status?: number | null
+  viewport?: string | null
+  user_agent?: string | null
+  scraper_wait_until?: string | null
+  wcag_target: string
+  report_version: string
+  performance_run?: PerformanceRunConfig | null
+  scope_limitations: string[]
 }
 
 /**
@@ -125,6 +221,8 @@ export interface StructuredAuditReport {
   recommendations: Recommendation[]
   screenshot_full_page_base64: string | null
   screenshot_viewport_base64: string | null
+  screenshot_quality?: ScreenshotQuality | null
+  run_context?: RunContext | null
 }
 
 export type JobStatus = "pending" | "running" | "completed" | "failed"

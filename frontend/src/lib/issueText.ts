@@ -80,9 +80,52 @@ const WHY_IT_MATTERS_BY_TITLE: Record<string, string> = {
     "Low-contrast text is hard to read for many visitors and can exclude people with visual impairments.",
 }
 
+// ---------------------------------------------------------------------------
+// Title normalization
+//
+// The backend now sends edited, human-readable titles ("CTA quality", not
+// "Cta Quality"; "Button with no accessible name", not "Empty Button") so that
+// every output — PDF, API, UI — reads the same way. The presentation maps here
+// are keyed by the older machine-derived titles, and rekeying all of them would
+// be churn for no gain, so lookups normalize through this table instead.
+//
+// Keyed lookups should prefer `Recommendation.rule_id` where a new call site
+// can: rule ids are the stable contract, titles are editorial.
+// ---------------------------------------------------------------------------
+
+const LEGACY_TITLE_BY_LABEL: Record<string, string> = {
+  "Missing alt text": "Missing Alt Text",
+  "Missing image alt text": "Missing Image Alt Text",
+  "Multiple H1 headings": "Multiple H1",
+  "Button with no accessible name": "Empty Button",
+  "Form field with no label": "Missing Label",
+  "Missing page title": "Missing Page Title",
+  "Missing meta description": "Missing Meta Description",
+  "Missing H1 heading": "Missing H1",
+  "Missing Open Graph tag": "Missing Open Graph Tags",
+  "Low Lighthouse performance score": "Low Performance Score",
+  "Slow LCP (Largest Contentful Paint)": "Slow Lcp",
+  "High CLS (Cumulative Layout Shift)": "High Cls",
+  "Slow INP (Interaction to Next Paint)": "Slow Inp",
+  "Value proposition clarity": "Value Proposition Clarity",
+  "Readability": "Readability",
+  "CTA quality": "Cta Quality",
+  "Jargon": "Jargon",
+  "Trust signals": "Trust Signals",
+  "Visual hierarchy": "Visual Hierarchy",
+  "CTA visibility": "Cta Visibility",
+  "Layout issues": "Layout Issues",
+  "Contrast problems": "Contrast Problems",
+}
+
+/** Map a backend title onto the key the presentation maps in this file use. */
+export function legacyTitleKey(title: string): string {
+  return LEGACY_TITLE_BY_LABEL[title] ?? title
+}
+
 export function getWhyItMatters(title: string): string {
   return (
-    WHY_IT_MATTERS_BY_TITLE[title] ??
+    WHY_IT_MATTERS_BY_TITLE[legacyTitleKey(title)] ??
     "Addressing this improves your site's overall quality and visitor experience."
   )
 }
@@ -110,7 +153,7 @@ const RECOMMENDED_FIX_BY_TITLE: Record<string, string> = {
  * prompts in agents/prompts/copy.py + visual.py) — so we keep it as-is.
  */
 function getRecommendedFix(title: string, displayDescription: string): string {
-  return RECOMMENDED_FIX_BY_TITLE[title] ?? displayDescription
+  return RECOMMENDED_FIX_BY_TITLE[legacyTitleKey(title)] ?? displayDescription
 }
 
 // ---------------------------------------------------------------------------
@@ -159,7 +202,7 @@ const EFFORT_BY_TITLE: Record<string, EffortTier> = {
 }
 
 export function effortFor(title: string): EffortTier {
-  return EFFORT_BY_TITLE[title] ?? "moderate"
+  return EFFORT_BY_TITLE[legacyTitleKey(title)] ?? "moderate"
 }
 
 // ---------------------------------------------------------------------------
