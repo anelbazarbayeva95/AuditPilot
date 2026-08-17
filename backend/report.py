@@ -16,9 +16,10 @@ import logging
 import time
 from typing import Awaitable, Callable, Optional
 
+from actions import build_action_plan
 from agents.performance import PerformanceAgent
 from agents.visual import VisualAgent, insufficient_evidence_result
-from labels import humanize
+from labels import humanize, round_half_up
 from models.schemas import (
     AuditCategory,
     AuditResult,
@@ -208,6 +209,8 @@ def combine_report(
     if excluded:
         logger.info("report.combine categories_excluded=%s", excluded)
 
+    action_plan, kpi_notes = build_action_plan(categories)
+
     return StructuredAuditReport(
         summary=ReportSummary(
             overall_score=overall_score,
@@ -223,6 +226,8 @@ def combine_report(
         copy=audit_result.copy,
         visual=visual,
         recommendations=recommendations,
+        action_plan=action_plan,
+        kpi_notes=kpi_notes,
         screenshot_full_page_base64=_b64(screenshots.full_page_png) if screenshots else None,
         screenshot_viewport_base64=_b64(screenshots.viewport_png) if screenshots else None,
         screenshot_quality=screenshots.quality if screenshots else None,
@@ -259,11 +264,21 @@ def _weighted_overall(
     normalized = {name: weight / total_weight for name, weight in included.items()}
     overall = sum(categories[name].score * weight for name, weight in normalized.items())
 
+    # The printed arithmetic has to reproduce the printed answer. Rounding the
+    # weights to whole percents doesn't: 29% + 24% + 29% + 18% of those scores
+    # sums to 61.7, not the 61.3 actually computed, so a reader checking the
+    # maths finds it doesn't add up — in a report whose whole argument is that
+    # its numbers are checkable. Weights are shown to one decimal, each
+    # contribution is shown, and the total is stated before rounding.
     parts = [
-        f"{humanize(name)} {categories[name].score:.0f} x {weight:.0%}"
+        f"{humanize(name)} {round_half_up(categories[name].score):g} x {weight * 100:.1f}% "
+        f"({categories[name].score * weight:.1f})"
         for name, weight in normalized.items()
     ]
-    explanation = f"Weighted average: {' + '.join(parts)} = {overall:.0f}."
+    explanation = (
+        f"Weighted average: {' + '.join(parts)} = {overall:.1f}, "
+        f"reported as {round_half_up(overall):g}/100."
+    )
     if excluded:
         excluded_text = ", ".join(f"{humanize(name)} ({why})" for name, why in excluded.items())
         explanation += f" Excluded: {excluded_text}. Weights renormalized over the rest."

@@ -17,6 +17,8 @@ and "1 accessibility issue found".
 
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal
+
 # Identifiers whose correct written form isn't reachable by title-casing —
 # acronyms, initialisms, and product terms. Keyed by the raw enum value.
 _LABEL_OVERRIDES: dict[str, str] = {
@@ -92,6 +94,38 @@ def humanize(value: object) -> str:
         return override
     words = text.replace("_", " ").replace("-", " ").strip()
     return words[:1].upper() + words[1:] if words else ""
+
+
+def round_half_up(value: float) -> int:
+    """Round the way a reader expects: 61.5 -> 62, 62.5 -> 63.
+
+    Python's built-in `round` and `%.0f` both round halves to even, so 62.5
+    would display as 62. Every score shown to a reader goes through this, so
+    the report's own arithmetic always reproduces the number beside it.
+    """
+    return int(Decimal(str(value)).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+SCORE_BANDS: tuple[tuple[int, str], ...] = (
+    (90, "Excellent"),
+    (70, "Good"),
+    (40, "Needs attention"),
+    (0, "Critical"),
+)
+
+
+def score_band(score: float | None) -> str | None:
+    """'61/100' says nothing on its own — this is what makes it interpretable.
+
+    Bands are fixed and printed alongside the scale in the report, so the label
+    is a stated convention rather than a private judgment.
+    """
+    if score is None:
+        return None
+    for floor, label in SCORE_BANDS:
+        if score >= floor:
+            return label
+    return None
 
 
 def pluralize(count: int, singular: str, plural: str | None = None) -> str:

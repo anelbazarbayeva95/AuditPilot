@@ -176,6 +176,41 @@ export interface ScreenshotQuality {
   reason?: string | null
 }
 
+/** One Lighthouse opportunity, with the real resources and measured savings. */
+export interface PerformanceOpportunity {
+  audit_id: string
+  title: string
+  savings_ms?: number | null
+  savings_bytes?: number | null
+  resources: string[]
+}
+
+/**
+ * One unit of work in the priority plan.
+ *
+ * Distinct from `Recommendation`: a recommendation is a finding, an action is
+ * a fix. Several findings across several categories can share one action, so
+ * this carries `categories` and `findings_resolved` rather than one category.
+ */
+export interface ActionItem {
+  key: string
+  title: string
+  description: string
+  categories: string[]
+  rule_ids: string[]
+  findings_resolved: number
+  severity: Severity
+  impact?: ImpactLevel | null
+  effort?: EffortLevel | null
+  timing?: TimingBand | null
+  confidence?: ConfidenceLevel | null
+  detection?: DetectionMethod | null
+  primary_standard?: string | null
+  estimated_saving?: string | null
+  validation?: string | null
+  owner?: string | null
+}
+
 /** How the audit was produced — the report's methodology. */
 export interface PerformanceRunConfig {
   lighthouse_version?: string | null
@@ -219,6 +254,10 @@ export interface StructuredAuditReport {
   copy: CategoryResult
   visual: CategoryResult
   recommendations: Recommendation[]
+  /** Findings consolidated into units of work — one entry per fix, not per finding. */
+  action_plan?: ActionItem[]
+  /** Outcome metrics deliberately kept out of the plan (e.g. the Lighthouse score). */
+  kpi_notes?: string[]
   screenshot_full_page_base64: string | null
   screenshot_viewport_base64: string | null
   screenshot_quality?: ScreenshotQuality | null

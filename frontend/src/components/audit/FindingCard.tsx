@@ -1,4 +1,4 @@
-import { Check, ChevronRight } from "lucide-react"
+import { Check, ChevronRight, Ruler, Sparkles } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import {
@@ -8,7 +8,14 @@ import {
   looksLikeCode,
   occurrenceElement,
 } from "@/lib/issueText"
-import { isElevatedSeverity, severityStripeClass } from "@/lib/score"
+import {
+  isElevatedSeverity,
+  provenanceChipClass,
+  provenanceLabel,
+  provenanceOf,
+  provenanceTooltip,
+  severityStripeClass,
+} from "@/lib/score"
 import { cn } from "@/lib/utils"
 import type { Recommendation, Severity } from "@/types/audit"
 
@@ -43,6 +50,7 @@ export function FindingCard({
 }) {
   const isGroup = occurrences.length > 1
   const primary = occurrences[0]
+  const provenance = provenanceOf(primary.detection)
   const element = !isGroup ? occurrenceElement(primary) : null
   // Only meaningful for a single occurrence — a group can span several
   // sections (e.g. buttons in both the header and footer), so it's left for
@@ -76,7 +84,7 @@ export function FindingCard({
         "hover:-translate-y-0.5 hover:bg-secondary/40 hover:shadow-[0_10px_24px_-18px_rgba(20,22,28,0.4)]",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         "print:cursor-auto print:hover:translate-y-0 print:hover:shadow-none",
-        isElevatedSeverity(severity) && "bg-destructive/[0.03]"
+        isElevatedSeverity(severity) && "bg-severity-high-bg/40"
       )}
     >
       <div className={cn("absolute inset-y-0 left-0 w-[4px]", severityStripeClass[severity])} />
@@ -144,7 +152,35 @@ export function FindingCard({
         </div>
       )}
 
-      <p className="text-xs text-foreground/60">{getWhyItMatters(title)}</p>
+      <p className="text-[13px] leading-relaxed text-foreground/75">{getWhyItMatters(title)}</p>
+
+      {/* Provenance and planning metadata, deliberately subdued: it qualifies
+          the finding, it isn't the finding. The provenance chip carries a word
+          as well as a colour — a measured fact and a model's opinion must not
+          be told apart by hue alone. */}
+      <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[11px] text-muted-foreground">
+        <span
+          className={cn(
+            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-semibold",
+            provenanceChipClass[provenance]
+          )}
+          title={provenanceTooltip[provenance]}
+        >
+          {provenance === "measured" ? (
+            <Ruler className="size-3" aria-hidden="true" />
+          ) : (
+            <Sparkles className="size-3" aria-hidden="true" />
+          )}
+          {provenanceLabel[provenance]}
+        </span>
+        {primary.impact && <span>Impact: {primary.impact}</span>}
+        {primary.effort && <span>Effort: {primary.effort}</span>}
+        {primary.wcag_criterion && (
+          <span className="max-w-full truncate" title={primary.wcag_criterion}>
+            {primary.wcag_criterion}
+          </span>
+        )}
+      </div>
 
       <span className="mt-0.5 flex w-fit items-center gap-1 text-xs font-semibold text-link">
         {isGroup ? "View occurrences" : "View details"}

@@ -7,6 +7,7 @@ import base64
 import pytest
 
 from agents.visual import insufficient_evidence_result
+from labels import round_half_up
 from models.schemas import (
     AuditCategory,
     AuditResult,
@@ -318,3 +319,102 @@ class _FakeOrchestrator:
 class _FakePerformanceAgent:
     async def analyze(self, url, context):
         return make_performance()
+
+
+class TestScoreArithmeticIsCheckable:
+    def test_printed_terms_reproduce_the_printed_total(self):
+        """A reader who checks the maths must get the number that's printed.
+
+        Rounding the weights to whole percents broke this: the terms summed to
+        61.7 while the report said 61.
+        """
+        import re
+
+        report = combine_report(make_audit_result(), make_performance(), make_visual())
+        explanation = report.summary.score_explanation
+
+        terms = [float(t) for t in re.findall(r"\((\d+\.\d)\)", explanation)]
+        assert len(terms) == 5, explanation
+        # Each term is printed to one decimal, so the visible sum can drift by
+        # up to half a tick per term — but not by the 0.4 that whole-percent
+        # weights introduced.
+        assert sum(terms) == pytest.approx(report.summary.overall_score, abs=0.3)
+
+    def test_reported_score_uses_conventional_rounding(self):
+        assert round_half_up(61.5) == 62
+        assert round_half_up(62.5) == 63  # not Python's round-half-even 62
+        assert round_half_up(61.4) == 61
+
+    def test_explanation_states_the_rounded_figure(self):
+        report = combine_report(make_audit_result(), make_performance(), make_visual())
+
+        assert "reported as" in report.summary.score_explanation
+
+
+class TestActionPlanConsolidation:
+    def test_one_fix_across_two_categories_is_one_action(self):
+        audit = make_audit_result()
+        audit.accessibility.recommendations = [Recommendation(
+            title="Missing alt text", description="No alt attribute.", severity=Severity.HIGH,
+            category=AuditCategory.ACCESSIBILITY, rule_id="missing_alt_text",
+        )]
+        audit.seo.recommendations = [Recommendation(
+            title="Missing image alt text", description="No alt text.", severity=Severity.LOW,
+            category=AuditCategory.SEO, rule_id="missing_image_alt_text",
+        )]
+
+        report = combine_report(audit, make_performance(), make_visual())
+        alt_actions = [a for a in report.action_plan if a.key == "alt-text"]
+
+        assert len(alt_actions) == 1
+        assert alt_actions[0].findings_resolved == 2
+        assert set(alt_actions[0].categories) == {"accessibility", "seo"}
+        assert alt_actions[0].primary_standard.startswith("WCAG 1.1.1")
+
+    def test_merging_keeps_the_more_severe_characterization(self):
+        audit = make_audit_result()
+        audit.accessibility.recommendations = [Recommendation(
+            title="Missing alt text", description="d", severity=Severity.HIGH,
+            category=AuditCategory.ACCESSIBILITY, rule_id="missing_alt_text",
+        )]
+        audit.seo.recommendations = [Recommendation(
+            title="Missing image alt text", description="d", severity=Severity.LOW,
+            category=AuditCategory.SEO, rule_id="missing_image_alt_text",
+        )]
+
+        report = combine_report(audit, make_performance(), make_visual())
+        action = next(a for a in report.action_plan if a.key == "alt-text")
+
+        assert action.severity is Severity.HIGH  # never quietly downgraded
+
+    def test_lighthouse_score_becomes_a_kpi_note(self):
+        performance = CategoryResult(
+            category=AuditCategory.PERFORMANCE, score=25.0,
+            recommendations=[Recommendation(
+                title="Low Lighthouse performance score", description="25/100.",
+                severity=Severity.HIGH, category=AuditCategory.PERFORMANCE,
+                rule_id="low_performance_score",
+            )],
+        )
+        report = combine_report(make_audit_result(), performance, make_visual())
+
+        assert not [a for a in report.action_plan if "low_performance_score" in a.rule_ids]
+        assert report.kpi_notes
+        assert "not a task in itself" in report.kpi_notes[0]
+
+    def test_performance_opportunities_become_concrete_actions(self):
+        performance = CategoryResult(
+            category=AuditCategory.PERFORMANCE, score=25.0,
+            raw_data={"opportunities": [{
+                "audit_id": "render-blocking-resources",
+                "title": "Eliminate render-blocking resources",
+                "savings_ms": 1240.0, "savings_bytes": 98304,
+                "resources": ["https://example.com/main.css"],
+            }]},
+        )
+        report = combine_report(make_audit_result(), performance, make_visual())
+        action = next(a for a in report.action_plan if a.key == "perf-render-blocking-resources")
+
+        assert "main.css" in action.description
+        assert action.estimated_saving is not None
+        assert "1,240 ms" in action.estimated_saving

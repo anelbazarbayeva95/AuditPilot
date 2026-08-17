@@ -123,11 +123,23 @@ export function legacyTitleKey(title: string): string {
   return LEGACY_TITLE_BY_LABEL[title] ?? title
 }
 
+const GENERIC_WHY_IT_MATTERS =
+  "Addressing this improves your site's overall quality and visitor experience."
+
 export function getWhyItMatters(title: string): string {
-  return (
-    WHY_IT_MATTERS_BY_TITLE[legacyTitleKey(title)] ??
-    "Addressing this improves your site's overall quality and visitor experience."
-  )
+  return WHY_IT_MATTERS_BY_TITLE[legacyTitleKey(title)] ?? GENERIC_WHY_IT_MATTERS
+}
+
+/**
+ * Whether we have something real to say about this title.
+ *
+ * Lets a caller omit the line entirely rather than print the generic
+ * fallback. Filler under a heading that promises "why it matters" is worse
+ * than silence — it teaches the reader that these sentences carry no
+ * information.
+ */
+export function hasWhyItMatters(title: string): boolean {
+  return WHY_IT_MATTERS_BY_TITLE[legacyTitleKey(title)] !== undefined
 }
 
 /** Generic, factual remediation text for the finite set of rule-based check titles. */

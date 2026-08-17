@@ -618,6 +618,42 @@ class Recommendation(BaseModel):
     evidence: Optional[Evidence] = None
 
 
+class ActionItem(BaseModel):
+    """One unit of work in the priority action plan.
+
+    Distinct from `Recommendation`: a recommendation is a finding, an action is
+    a fix. Several findings across several categories can share one action —
+    adding an alt attribute closes an accessibility finding and an SEO finding
+    with a single edit — so this carries `categories` and `findings_resolved`
+    rather than a single category.
+    """
+
+    key: str = Field(description="Stable identifier for this action, used for de-duplication.")
+    title: str
+    description: str
+    categories: list[str] = Field(
+        default_factory=list, description="Every category this one fix benefits."
+    )
+    rule_ids: list[str] = Field(default_factory=list)
+    findings_resolved: int = 1
+    severity: Severity
+    impact: Optional[ImpactLevel] = None
+    effort: Optional[EffortLevel] = None
+    timing: Optional[TimingBand] = None
+    confidence: Optional[ConfidenceLevel] = None
+    detection: Optional[DetectionMethod] = None
+    primary_standard: Optional[str] = Field(
+        default=None, description="The standard this fix satisfies, e.g. a WCAG criterion."
+    )
+    estimated_saving: Optional[str] = Field(
+        default=None, description="Measured saving, for performance work — never estimated here."
+    )
+    validation: Optional[str] = None
+    owner: Optional[str] = Field(
+        default=None, description="Caller-supplied only; never inferred."
+    )
+
+
 class CategoryResult(BaseModel):
     """Result produced by a single agent for one audit category."""
 
@@ -765,6 +801,16 @@ class StructuredAuditReport(BaseModel):
     copy: CategoryResult
     visual: CategoryResult
     recommendations: list[Recommendation] = Field(default_factory=list)
+    action_plan: list[ActionItem] = Field(
+        default_factory=list,
+        description="Findings consolidated into ranked units of work — one entry per fix, not "
+        "per finding, so a single edit that resolves issues in two categories appears once.",
+    )
+    kpi_notes: list[str] = Field(
+        default_factory=list,
+        description="Outcome metrics deliberately excluded from the action plan (e.g. the "
+        "Lighthouse score), stated so their absence reads as a decision, not an omission.",
+    )
     screenshot_full_page_base64: Optional[str] = Field(
         default=None, description="Full-page screenshot PNG, base64-encoded."
     )

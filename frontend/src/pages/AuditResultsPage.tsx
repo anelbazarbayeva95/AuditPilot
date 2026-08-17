@@ -7,13 +7,15 @@ import { ChartsSection } from "@/components/audit/ChartsSection"
 import { CopyReviewCard } from "@/components/audit/CopyReviewCard"
 import { ExecutiveSummary } from "@/components/audit/ExecutiveSummary"
 import { GroupedFindingsSection, findingGroupAnchorId } from "@/components/audit/GroupedFindingsSection"
+import { MethodologyPanel } from "@/components/audit/MethodologyPanel"
 import { PrioritizedRecommendations } from "@/components/audit/PrioritizedRecommendations"
 import { ResultsSidebar, type SectionId } from "@/components/audit/ResultsSidebar"
 import { ResultsSubNav, type SubNavItem } from "@/components/audit/ResultsSubNav"
 import { VisualReviewCard } from "@/components/audit/VisualReviewCard"
 import { ApiError, downloadReportPdf } from "@/lib/api"
-import { dedupeRecommendations, groupFindingsByTitle } from "@/lib/issueText"
+import { groupFindingsByTitle } from "@/lib/issueText"
 import { isCopyRawData, isVisualRawData } from "@/lib/rawData"
+import { actionsOf } from "@/lib/summary"
 import type { StructuredAuditReport } from "@/types/audit"
 
 interface LocationState {
@@ -44,6 +46,7 @@ const SUB_NAV_TITLE: Record<SectionId, string> = {
   copy: "In this section",
   charts: "In this section",
   actions: "Items in this list",
+  methodology: "In this section",
 }
 
 /**
@@ -88,7 +91,6 @@ export function AuditResultsPage() {
 
   const visualData = isVisualRawData(report.visual.raw_data) ? report.visual.raw_data : null
   const copyData = isCopyRawData(report.copy.raw_data) ? report.copy.raw_data : null
-  const dedupedActions = dedupeRecommendations(report.recommendations)
 
   function selectSection(id: SectionId) {
     setActive(id)
@@ -100,8 +102,9 @@ export function AuditResultsPage() {
       case "summary":
         return [
           { id: "summary-health", label: "Overall health" },
-          { id: "summary-top-issue", label: "Top issue" },
-          { id: "summary-also-fixing", label: "Also worth fixing" },
+          { id: "summary-messages", label: "What this means" },
+          { id: "summary-top-issue", label: "Start here" },
+          { id: "summary-also-fixing", label: "Then" },
           { id: "summary-strengths", label: "Key strengths" },
         ]
       case "visual":
@@ -149,7 +152,17 @@ export function AuditResultsPage() {
           { id: "chart-severity", label: "Issues by Severity" },
         ]
       case "actions":
-        return dedupedActions.map((issue, i) => ({ id: `action-${i + 1}`, label: `${i + 1} · ${issue.title}` }))
+        return actionsOf(report).map((action, i) => ({
+          id: `action-${i + 1}`,
+          label: `${i + 1} · ${action.title}`,
+        }))
+      case "methodology":
+        return [
+          { id: "methodology-run", label: "Run conditions" },
+          { id: "methodology-scoring", label: "Scoring model" },
+          { id: "methodology-coverage", label: "Coverage by category" },
+          { id: "methodology-scope", label: "Scope limitations" },
+        ]
       default:
         return []
     }
@@ -218,6 +231,7 @@ export function AuditResultsPage() {
               result={report.visual}
               screenshotViewportBase64={report.screenshot_viewport_base64}
               screenshotFullPageBase64={report.screenshot_full_page_base64}
+              screenshotQuality={report.screenshot_quality}
             />
           )}
           {active === "accessibility" && (
@@ -254,7 +268,8 @@ export function AuditResultsPage() {
               onViewActions={() => selectSection("actions")}
             />
           )}
-          {active === "actions" && <PrioritizedRecommendations items={report.recommendations} pageUrl={url} />}
+          {active === "actions" && <PrioritizedRecommendations report={report} pageUrl={url} />}
+          {active === "methodology" && <MethodologyPanel report={report} />}
         </main>
 
         <ResultsSubNav title={SUB_NAV_TITLE[active]} items={subItems} />

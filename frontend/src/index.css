@@ -37,6 +37,21 @@
   --color-link: var(--link);
   --color-quickfix-bg: var(--quickfix-bg);
   --color-quickfix-text: var(--quickfix-text);
+  --color-measured: var(--measured);
+  --color-measured-bg: var(--measured-bg);
+  --color-judgment: var(--judgment);
+  --color-judgment-bg: var(--judgment-bg);
+  --color-withheld: var(--withheld);
+  --color-withheld-bg: var(--withheld-bg);
+  --color-severity-critical: var(--severity-critical);
+  --color-severity-critical-bg: var(--severity-critical-bg);
+  --color-severity-high: var(--severity-high);
+  --color-severity-high-bg: var(--severity-high-bg);
+  --color-severity-medium: var(--severity-medium);
+  --color-severity-medium-bg: var(--severity-medium-bg);
+  --color-severity-low: var(--severity-low);
+  --color-severity-low-bg: var(--severity-low-bg);
+  --color-status-excellent: var(--status-excellent);
   --font-sans: "Instrument Sans", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-display: "Syne", "Instrument Sans", -apple-system, sans-serif;
   --radius-sm: calc(var(--radius) - 4px);
@@ -107,6 +122,43 @@
   --link: oklch(48% 0.15 135);
   --quickfix-bg: oklch(96% 0.06 128);
   --quickfix-text: oklch(45% 0.13 135);
+
+  /* ── Provenance: what kind of claim is this? ────────────────────────────
+     The product's actual differentiator is that it distinguishes a
+     measurement from an opinion from a refusal to judge — so that
+     distinction gets its own colour axis rather than being left to prose.
+     These three are never used for severity, and severity hues are never
+     used for these: one hue, one job. Both surfaces (cream page, white
+     card) clear 4.5:1 for every text token below.
+
+     measured  — teal, an instrument reading
+     judgment  — violet, a model's opinion, held at arm's length
+     withheld  — slate, "we declined to judge", deliberately colourless */
+  --measured: oklch(46% 0.09 205);
+  --measured-bg: oklch(96% 0.02 205);
+  --judgment: oklch(48% 0.14 292);
+  --judgment-bg: oklch(96% 0.03 292);
+  --withheld: oklch(50% 0.03 250);
+  --withheld-bg: oklch(96% 0.006 250);
+
+  /* ── Severity: how bad is this finding? ─────────────────────────────────
+     Critical and high were previously the same red, which flattened the
+     top of the scale exactly where a reader most needs it separated. */
+  --severity-critical: oklch(44% 0.19 25);
+  --severity-critical-bg: oklch(95% 0.03 25);
+  --severity-high: oklch(53% 0.18 38);
+  --severity-high-bg: oklch(95.5% 0.03 38);
+  --severity-medium: oklch(54% 0.13 75);
+  --severity-medium-bg: oklch(96% 0.04 75);
+  --severity-low: oklch(50% 0.02 250);
+  --severity-low-bg: oklch(96% 0.006 250);
+
+  /* Fourth score band. The existing three stop at "good"; the report's
+     published scale has an "excellent" tier above it, and the UI has to
+     agree with the PDF about where the lines fall. */
+  --status-excellent: oklch(50% 0.14 150);
+  --status-excellent-bar: oklch(85% 0.19 128);
+  --status-excellent-on-dark: oklch(80% 0.16 150);
 }
 
 .dark {

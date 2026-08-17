@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
@@ -48,7 +48,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from labels import format_report_datetime, humanize, pluralize
+from actions import build_action_plan
+from labels import format_report_datetime, humanize, pluralize, round_half_up, score_band
 from models.schemas import (
     AuditResult,
     CategoryResult,
@@ -109,37 +110,56 @@ def build_pdf_report(
     coverage data on this path, so the Methodology section says what it can and
     is explicit about the rest being unrecorded rather than inventing it.
     """
+    categories: list[tuple[str, CategoryResult | None]] = [
+        ("Accessibility", result.accessibility),
+        ("SEO", result.seo),
+        ("Copy", result.copy),
+        ("Performance", performance),
+        ("Visual", visual),
+    ]
+    action_plan, kpi_notes = build_action_plan(
+        {name.lower(): cat for name, cat in categories if cat is not None}
+    )
     view = _ReportView(
         url=url,
         overall_score=result.overall_score,
-        categories=[
-            ("Accessibility", result.accessibility),
-            ("SEO", result.seo),
-            ("Copy", result.copy),
-            ("Performance", performance),
-            ("Visual", visual),
-        ],
+        categories=categories,
         screenshot_b64=screenshot_viewport_base64,
+        action_plan=action_plan,
+        kpi_notes=kpi_notes,
     )
     return _build_pdf_bytes(view)
 
 
 def build_pdf_report_from_structured(url: str, report: StructuredAuditReport) -> bytes:
     """Render a StructuredAuditReport (the current job-based flow) as a PDF."""
+    categories = [
+        ("Accessibility", report.accessibility),
+        ("SEO", report.seo),
+        ("Copy", report.copy),
+        ("Performance", report.performance),
+        ("Visual", report.visual),
+    ]
+    # combine_report() populates the plan, but a report handed straight to the
+    # PDF endpoint (or built before this field existed) may not carry one, and
+    # an empty action plan would read as "nothing to do" rather than "not
+    # computed". Derive it from the findings instead.
+    action_plan, kpi_notes = list(report.action_plan), list(report.kpi_notes)
+    if not action_plan:
+        action_plan, kpi_notes = build_action_plan(
+            {name.lower(): cat for name, cat in categories if cat is not None}
+        )
+
     view = _ReportView(
         url=url,
         overall_score=report.summary.overall_score,
-        categories=[
-            ("Accessibility", report.accessibility),
-            ("SEO", report.seo),
-            ("Copy", report.copy),
-            ("Performance", report.performance),
-            ("Visual", report.visual),
-        ],
+        categories=categories,
         screenshot_b64=report.screenshot_viewport_base64,
         screenshot_quality=report.screenshot_quality,
         run_context=report.run_context,
         summary=report.summary,
+        action_plan=action_plan,
+        kpi_notes=kpi_notes,
     )
     return _build_pdf_bytes(view)
 
@@ -155,6 +175,8 @@ class _ReportView:
     screenshot_quality: Optional[ScreenshotQuality] = None
     run_context: Optional[RunContext] = None
     summary: Optional[ReportSummary] = None
+    action_plan: list = field(default_factory=list)
+    kpi_notes: list[str] = field(default_factory=list)
 
     @property
     def host(self) -> str:
@@ -342,6 +364,10 @@ def _build_styles():
     styles.add(ParagraphStyle(
         "ScoreBig", parent=styles["Normal"], fontSize=26, leading=30, alignment=TA_RIGHT,
     ))
+    styles.add(ParagraphStyle(
+        "FigureLabel", parent=styles["Normal"], fontSize=9, leading=12, alignment=TA_CENTER,
+        textColor=_WARN_INK,
+    ))
     return styles
 
 
@@ -396,6 +422,10 @@ def _executive_summary(view: _ReportView, styles) -> list:
 
     score_text = _fmt_score(view.overall_score)
     color = _score_color(view.overall_score).hexval()[2:]
+    # A bare "61/100" leaves the reader to guess whether that's a crisis or a
+    # good day. The band label and the scale beneath it make the number mean
+    # something without the reader having to infer a convention.
+    band = score_band(view.overall_score)
     headline = Table(
         [[
             Paragraph(
@@ -403,7 +433,11 @@ def _executive_summary(view: _ReportView, styles) -> list:
                 + _esc(_overall_verdict(view)),
                 styles["Body"],
             ),
-            Paragraph(f"<font color='#{color}'><b>{score_text}</b></font>", styles["ScoreBig"]),
+            Paragraph(
+                f"<font color='#{color}'><b>{score_text}</b></font>"
+                + (f"<br/><font size='9' color='#{color}'>{_esc(band)}</font>" if band else ""),
+                styles["ScoreBig"],
+            ),
         ]],
         colWidths=[_PAGE_WIDTH - 1.8 * inch, 1.8 * inch],
     )
@@ -417,7 +451,13 @@ def _executive_summary(view: _ReportView, styles) -> list:
         ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
     ]))
     story.append(headline)
-    story.append(Spacer(1, 0.12 * inch))
+    story.append(Paragraph(
+        "Score bands: 0-39 Critical &nbsp;·&nbsp; 40-69 Needs attention &nbsp;·&nbsp; "
+        "70-89 Good &nbsp;·&nbsp; 90-100 Excellent",
+        styles["Meta"],
+    ))
+    story.append(Spacer(1, 0.1 * inch))
+    story.extend(_key_messages(view, styles))
 
     if view.summary and view.summary.score_explanation:
         story.append(Paragraph(
@@ -438,19 +478,105 @@ def _executive_summary(view: _ReportView, styles) -> list:
     return story
 
 
+def _key_messages(view: _ReportView, styles) -> list:
+    """Primary risk, largest opportunity, audit confidence.
+
+    The report's job isn't to report what the scanner found — it's to tell the
+    reader what they now know and what to do about it. These three lines are
+    the decision; everything after them is the evidence for it. Each is built
+    only from measured values, and any message without support is omitted
+    rather than padded out.
+    """
+    messages: list[tuple[str, str]] = []
+
+    top_action = view.action_plan[0] if view.action_plan else None
+    if top_action:
+        detail = top_action.description
+        if top_action.findings_resolved > 1:
+            detail = (
+                f"{pluralize(top_action.findings_resolved, 'finding')} across "
+                f"{', '.join(humanize(c) for c in top_action.categories)} resolve with this one fix."
+            )
+        messages.append(("Primary risk", f"{top_action.title}. {detail}"))
+
+    saving = _largest_measured_saving(view)
+    if saving:
+        messages.append(("Largest measured opportunity", saving))
+
+    scored = [name for name, cat in view.categories if cat is not None
+              and cat.score_status is ScoreStatus.SCORED]
+    excluded = (view.summary.excluded_categories if view.summary else {}) or {}
+    confidence = (
+        f"{len(scored)} of {len(view.categories)} categories produced reliable evidence."
+    )
+    if excluded:
+        confidence += " " + " ".join(
+            f"{humanize(name)} was withheld ({why})." for name, why in excluded.items()
+        )
+    messages.append(("Audit confidence", confidence))
+
+    rows = [
+        [Paragraph(f"<b>{_esc(label)}</b>", styles["Cell"]), Paragraph(_esc(text), styles["Cell"])]
+        for label, text in messages
+    ]
+    table = Table(rows, colWidths=[1.75 * inch, _PAGE_WIDTH - 1.75 * inch])
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, _RULE),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.0, _INK),
+        ("LEFTPADDING", (0, 0), (0, -1), 9),
+    ]))
+    return [table, Spacer(1, 0.12 * inch)]
+
+
+def _largest_measured_saving(view: _ReportView) -> Optional[str]:
+    """Total the performance savings Lighthouse actually measured, or say nothing.
+
+    Only quantified savings are claimed — an unquantified "big opportunity" is
+    the kind of line that gets an audit disbelieved.
+    """
+    for name, cat in view.categories:
+        if name != "Performance" or cat is None:
+            continue
+        opportunities = (cat.raw_data or {}).get("opportunities") or []
+        total_ms = sum(o.get("savings_ms") or 0 for o in opportunities)
+        if not total_ms:
+            return None
+        named = ", ".join(o.get("title", "") for o in opportunities[:2] if o.get("title"))
+        return (
+            f"Roughly {total_ms / 1000:.1f}s of measured load-time savings identified"
+            + (f", led by: {named}." if named else ".")
+        )
+    return None
+
+
 def _overall_verdict(view: _ReportView) -> str:
     """One sentence a reader can act on, built only from what was measured."""
     recs = view.all_recommendations()
-    urgent = [r for r in recs if r.severity in (Severity.CRITICAL, Severity.HIGH)]
+    critical = [r for r in recs if r.severity is Severity.CRITICAL]
+    high = [r for r in recs if r.severity is Severity.HIGH]
     excluded = list((view.summary.excluded_categories if view.summary else {}).items())
 
     if not recs:
         sentence = "No issues were found in the checks performed."
     else:
+        # Only name the severities actually present — "high or critical" when
+        # every one of them is high describes a document the reader isn't
+        # holding.
+        if critical and high:
+            urgency = f"{pluralize(len(critical), 'critical')} and {pluralize(len(high), 'high-severity finding')}"
+        elif critical:
+            urgency = pluralize(len(critical), 'critical finding')
+        elif high:
+            urgency = pluralize(len(high), 'high-priority finding')
+        else:
+            urgency = "no high or critical findings"
         sentence = (
             f"{pluralize(len(recs), 'finding')} across "
             f"{pluralize(len({r.category for r in recs}), 'category', 'categories')}, "
-            f"including {pluralize(len(urgent), 'high or critical issue')}."
+            f"including {urgency}."
         )
     if excluded:
         names = ", ".join(f"{humanize(name)} ({why})" for name, why in excluded)
@@ -550,19 +676,20 @@ def _priority_action_plan(view: _ReportView, styles) -> list:
         Paragraph("Priority action plan", styles["SectionH1"]),
     ]
 
-    groups = _group_recommendations(view.all_recommendations(), across_categories=True)
-    if not groups:
+    actions = view.action_plan
+    if not actions:
         story.append(Paragraph(
             "No actions arise from the checks performed. See Methodology for tested scope.",
             styles["Body"],
         ))
         return story
 
-    ranked = sorted(groups, key=_action_sort_key)[:_MAX_ACTIONS]
+    ranked = actions[:_MAX_ACTIONS]
     story.append(Paragraph(
         f"The {pluralize(len(ranked), 'action')} below are ranked by when they should be "
-        "scheduled, then by user impact and severity. Full detail for every finding is in the "
-        "category sections that follow.",
+        "scheduled, then by user impact and severity. Each is one unit of work: where a single "
+        "fix resolves findings in more than one category, it appears once and names both. Full "
+        "detail for every finding is in the category sections that follow.",
         styles["Body"],
     ))
     story.append(Spacer(1, 0.06 * inch))
@@ -570,31 +697,43 @@ def _priority_action_plan(view: _ReportView, styles) -> list:
     rows = [[
         Paragraph("#", styles["CellHead"]),
         Paragraph("Action", styles["CellHead"]),
+        Paragraph("Benefits", styles["CellHead"]),
         Paragraph("Impact", styles["CellHead"]),
         Paragraph("Effort", styles["CellHead"]),
         Paragraph("Timing", styles["CellHead"]),
         Paragraph("Owner", styles["CellHead"]),
     ]]
-    for index, group in enumerate(ranked, start=1):
-        lead = group.lead
-        where = ", ".join(sorted({humanize(m.category) for m in group.members}))
-        occurrence_note = (
-            f" — {pluralize(group.occurrences, 'occurrence')}" if group.occurrences > 1 else ""
-        )
+    for index, action in enumerate(ranked, start=1):
+        detail = ""
+        if action.findings_resolved > 1:
+            detail = f"Closes {pluralize(action.findings_resolved, 'finding')}"
+        if action.estimated_saving:
+            detail = f"{detail} · " if detail else ""
+            detail += f"Saves {action.estimated_saving}"
+        if action.primary_standard:
+            detail = f"{detail}<br/>" if detail else ""
+            detail += _esc(action.primary_standard)
+
         rows.append([
             Paragraph(str(index), styles["Cell"]),
             Paragraph(
-                f"<b>{_esc(group.title)}</b>{_esc(occurrence_note)}<br/>"
-                f"<font size='7.5' color='#6b7280'>{_esc(where)}</font>",
+                f"<b>{_esc(action.title)}</b>"
+                + (f"<br/><font size='7.5' color='#6b7280'>{detail}</font>" if detail else ""),
                 styles["Cell"],
             ),
-            Paragraph(_esc(humanize(lead.impact)) or "—", styles["Cell"]),
-            Paragraph(_esc(humanize(lead.effort)) or "—", styles["Cell"]),
-            Paragraph(_esc(humanize(lead.timing)) or "—", styles["Cell"]),
-            Paragraph(_esc(lead.owner) if lead.owner else "Unassigned", styles["Cell"]),
+            Paragraph(
+                _esc(", ".join(humanize(c) for c in action.categories)), styles["Cell"]
+            ),
+            Paragraph(_esc(humanize(action.impact)) or "—", styles["Cell"]),
+            Paragraph(_esc(humanize(action.effort)) or "—", styles["Cell"]),
+            Paragraph(_esc(humanize(action.timing)) or "—", styles["Cell"]),
+            Paragraph(_esc(action.owner) if action.owner else "Unassigned", styles["Cell"]),
         ])
 
-    table = Table(rows, colWidths=[0.3 * inch, 3.2 * inch, 0.8 * inch, 0.8 * inch, 1.0 * inch, 0.9 * inch])
+    table = Table(
+        rows,
+        colWidths=[0.28 * inch, 2.5 * inch, 1.15 * inch, 0.72 * inch, 0.7 * inch, 0.85 * inch, 0.8 * inch],
+    )
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), _PANEL),
         ("GRID", (0, 0), (-1, -1), 0.4, _RULE),
@@ -604,6 +743,13 @@ def _priority_action_plan(view: _ReportView, styles) -> list:
     ]))
     story.append(table)
     story.append(Spacer(1, 0.08 * inch))
+
+    # Outcome metrics are named here rather than dropped silently, so their
+    # absence from the plan reads as a deliberate distinction between the work
+    # and the measure of the work.
+    for note in view.kpi_notes:
+        story.append(Paragraph(f"<b>Success measure:</b> {_esc(note)}", styles["Meta"]))
+
     story.append(Paragraph(
         "Owner is only ever populated from information supplied to the audit — AuditPilot does not "
         "infer who maintains a component.",
@@ -658,6 +804,20 @@ def _category_sections(view: _ReportView, styles) -> list:
 
 def _finding_flowables(cat: CategoryResult, styles) -> list:
     if not cat.recommendations:
+        # "No issues found" is a *result*, and a category that was never
+        # assessed doesn't have one. Printing it under a category marked
+        # "insufficient evidence" contradicts the disclosure two lines above
+        # it and reads as a clean pass.
+        if cat.score_status is ScoreStatus.INSUFFICIENT_EVIDENCE:
+            return [Paragraph(
+                "No findings were generated because the evidence did not meet the quality "
+                "threshold for this category. This is not a clean result.",
+                styles["Body"],
+            )]
+        if cat.score_status is ScoreStatus.NOT_RUN:
+            return [Paragraph(
+                "No findings were generated because this category did not run.", styles["Body"]
+            )]
         return [Paragraph("No issues found in this category's checks.", styles["Body"])]
 
     flowables = [Spacer(1, 0.06 * inch)]
@@ -842,6 +1002,11 @@ def _insight_flowables(cat: CategoryResult, styles) -> list:
     contrast" is an opinion, and printing it in the same voice as a measurement
     is how a report overstates what it knows.
     """
+    # Empty "Strengths / None noted" headings under a category that was never
+    # assessed imply the model looked and found nothing. It didn't look.
+    if cat.score_status is not ScoreStatus.SCORED:
+        return []
+
     raw = cat.raw_data or {}
     flowables: list = []
     for label, key in (("Strengths", "strengths"), ("Weaknesses", "weaknesses")):
@@ -901,7 +1066,8 @@ def _screenshot_flowables(view: _ReportView, styles) -> list:
         ]))
         flowables += [Spacer(1, 0.06 * inch), notice, Spacer(1, 0.1 * inch)]
 
-    image = _screenshot_image(view.screenshot_b64)
+    degraded = quality is not None and quality.is_degraded
+    image = _screenshot_image(view.screenshot_b64, max_height=2.6 * inch if degraded else 4.2 * inch)
     if image is None:
         return flowables
 
@@ -913,8 +1079,57 @@ def _screenshot_flowables(view: _ReportView, styles) -> list:
     ]
     if quality is not None:
         caption_bits.append(f"Render check: {quality.status}")
-    caption = Paragraph(" · ".join(caption_bits), styles["Meta"])
 
+    if degraded:
+        # A failed capture reproduced bare looks like a rendering defect in
+        # *this* document rather than evidence about the audited page. Framing
+        # it — labelled, measured, captioned — makes it legible as a diagnostic
+        # artefact that was deliberately preserved.
+        measurements = []
+        if quality.dominant_color_pct is not None:
+            measurements.append(f"{quality.dominant_color_pct:.0f}% single flat color")
+        if quality.uniform_row_pct is not None:
+            measurements.append(f"{quality.uniform_row_pct:.0f}% rows without variation")
+        if quality.content_top_pct is not None:
+            measurements.append(f"first content at {quality.content_top_pct:.0f}% down")
+
+        figure = Table(
+            [
+                [Paragraph(
+                    "<b>CAPTURE FAILED — NOT ANALYSED</b>", styles["FigureLabel"]
+                )],
+                [image],
+                [Paragraph(
+                    _esc("Measured: " + "; ".join(measurements)) if measurements else "",
+                    styles["Meta"],
+                )],
+            ],
+            colWidths=[_PAGE_WIDTH],
+        )
+        figure.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), _PANEL),
+            ("BACKGROUND", (0, 0), (-1, 0), _WARN_BG),
+            ("BOX", (0, 0), (-1, -1), 0.8, _WARN_INK),
+            ("LINEBELOW", (0, 0), (-1, 0), 0.5, _WARN_INK),
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ]))
+        caption = Paragraph(
+            "Figure 1 — The image above is the actual capture, preserved as diagnostic evidence "
+            "of the failed render. It is not a rendering fault in this report, and it was not "
+            "used to assess the page. " + " · ".join(caption_bits),
+            styles["Meta"],
+        )
+        return flowables + [
+            CondPageBreak(3.6 * inch),
+            KeepTogether([figure, Spacer(1, 0.05 * inch), caption]),
+            Spacer(1, 0.12 * inch),
+        ]
+
+    caption = Paragraph(" · ".join(caption_bits), styles["Meta"])
     return flowables + [
         CondPageBreak(3.2 * inch),
         KeepTogether([image, Spacer(1, 0.05 * inch), caption]),
@@ -922,7 +1137,9 @@ def _screenshot_flowables(view: _ReportView, styles) -> list:
     ]
 
 
-def _screenshot_image(screenshot_base64: Optional[str]) -> Optional[Image]:
+def _screenshot_image(
+    screenshot_base64: Optional[str], max_height: float = 4.2 * inch
+) -> Optional[Image]:
     """Decode and size the screenshot, or return None if it can't be used."""
     if not screenshot_base64:
         return None
@@ -931,8 +1148,7 @@ def _screenshot_image(screenshot_base64: Optional[str]) -> Optional[Image]:
         img = Image(io.BytesIO(png_bytes))
         # Wider than the old 5.5in: the reviewed screenshot was too small to
         # inspect while still consuming most of a page.
-        max_width = _PAGE_WIDTH
-        max_height = 4.2 * inch
+        max_width = _PAGE_WIDTH - 0.4 * inch
         if img.imageWidth and img.imageHeight:
             scale = min(1.0, max_width / img.imageWidth, max_height / img.imageHeight)
             img.drawWidth = img.imageWidth * scale
@@ -1139,7 +1355,7 @@ def _score_color(score: float | None) -> colors.Color:
 
 
 def _fmt_score(score: float | None) -> str:
-    return "N/A" if score is None else f"{score:.0f}/100"
+    return "N/A" if score is None else f"{round_half_up(score)}/100"
 
 
 def _esc(text: object) -> str:

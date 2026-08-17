@@ -431,13 +431,55 @@ class TestDegradedScreenshotDisclosure:
 
 class TestActionPlan:
     def test_action_plan_is_ranked_and_deduplicated(self):
-        text = pdf_text(
+        pages = pdf_page_texts(
             build_pdf_report_from_structured("https://example.com", make_structured_report())
         )
+        plan_page = next(p for p in pages if "Priority action plan" in p)
 
-        assert "Priority action plan" in text
-        # Seven identical button findings collapse into one ranked action.
-        assert text.count("Button with no accessible name") <= 3
+        # Seven identical button findings become one ranked action, not seven
+        # rows — the plan is a work list, not a copy of the findings.
+        assert plan_page.count("Button with no accessible name") == 1
+
+    def test_related_findings_across_categories_become_one_action(self):
+        """One alt-attribute edit closes an Accessibility and an SEO finding."""
+        report = make_structured_report()
+        report.accessibility.recommendations.append(Recommendation(
+            title="Missing alt text", description="Image has no alt attribute.",
+            severity=Severity.HIGH, category=AuditCategory.ACCESSIBILITY,
+            rule_id="missing_alt_text", context="https://example.com/hero.png",
+        ))
+        report.seo.recommendations.append(Recommendation(
+            title="Missing image alt text", description="Image is missing alt text.",
+            severity=Severity.LOW, category=AuditCategory.SEO,
+            rule_id="missing_image_alt_text", context="https://example.com/hero.png",
+        ))
+        report.action_plan = []  # force the plan to be rebuilt from the findings
+
+        pages = pdf_page_texts(build_pdf_report_from_structured("https://example.com", report))
+        plan_page = next(p for p in pages if "Priority action plan" in p)
+
+        assert plan_page.count("Add alternative text to images") == 1
+        assert "Closes 2 findings" in plan_page
+        assert "Accessibility, SEO" in plan_page
+
+    def test_outcome_metrics_are_kpis_not_actions(self):
+        """"Improve the Lighthouse score" is not a task anyone can act on."""
+        report = make_structured_report()
+        report.performance.recommendations.append(Recommendation(
+            title="Low Lighthouse performance score",
+            description="Lighthouse performance score is 25/100.",
+            severity=Severity.HIGH, category=AuditCategory.PERFORMANCE,
+            rule_id="low_performance_score",
+        ))
+        report.action_plan = []
+
+        pages = pdf_page_texts(build_pdf_report_from_structured("https://example.com", report))
+        plan_page = next(p for p in pages if "Priority action plan" in p)
+
+        assert "Low Lighthouse performance score" not in plan_page
+        assert "Success measure" in plan_page
+        # The concrete intervention takes its place.
+        assert "render-blocking" in plan_page.lower()
 
     def test_owner_is_never_invented(self):
         text = pdf_text(
@@ -446,3 +488,86 @@ class TestActionPlan:
 
         assert "Unassigned" in text
         assert "does not infer who maintains a component" in text
+
+
+class TestNoInsufficientEvidenceContradictions:
+    """A category that was never assessed must not read as a clean pass."""
+
+    def test_no_clean_result_language_under_insufficient_evidence(self):
+        pages = pdf_page_texts(
+            build_pdf_report_from_structured("https://example.com", make_structured_report())
+        )
+        visual_page = next(p for p in pages if "Visual analysis was not performed" in p)
+
+        assert "No issues found in this category's checks." not in visual_page
+        assert "did not meet the quality threshold" in visual_page
+        assert "This is not a clean result." in visual_page
+
+    def test_no_empty_strength_headings_when_not_assessed(self):
+        """"Strengths: none noted" implies the model looked. It didn't."""
+        report = make_structured_report()
+        report.visual.raw_data = None
+        pages = pdf_page_texts(build_pdf_report_from_structured("https://example.com", report))
+        visual_page = next(p for p in pages if "Visual analysis was not performed" in p)
+
+        assert "None noted" not in visual_page
+
+    def test_clean_scored_category_still_says_no_issues(self):
+        text = pdf_text(
+            build_pdf_report_from_structured("https://example.com", make_structured_report())
+        )
+
+        # SEO scored 100 with no findings — that IS a clean result.
+        assert "No issues found across the 6 on-page checks performed." in text
+
+
+class TestScorePresentation:
+    def test_score_carries_a_band_label(self):
+        """61/100 alone doesn't tell the reader whether that's bad."""
+        text = pdf_text(
+            build_pdf_report_from_structured("https://example.com", make_structured_report())
+        )
+
+        assert "Needs attention" in text
+        assert "0-39 Critical" in text
+
+    def test_severity_wording_matches_what_is_present(self):
+        """Don't say "high or critical" when nothing is critical."""
+        text = pdf_text(
+            build_pdf_report_from_structured("https://example.com", make_structured_report())
+        )
+
+        assert "high or critical" not in text
+        assert "high-priority finding" in text
+
+    def test_executive_summary_leads_with_business_messages(self):
+        text = pdf_text(
+            build_pdf_report_from_structured("https://example.com", make_structured_report())
+        )
+
+        assert "Primary risk" in text
+        assert "Audit confidence" in text
+        assert "Largest measured opportunity" in text
+
+
+class TestFailedCaptureFigure:
+    def test_failed_capture_is_framed_and_labelled(self):
+        report = make_structured_report(
+            screenshot_quality=ScreenshotQuality(
+                status="degraded", dominant_color_pct=71.3, uniform_row_pct=64.3,
+                content_top_pct=82.0,
+                reason="The page did not finish rendering before capture.",
+            ),
+        )
+        report.screenshot_viewport_base64 = base64.b64encode(base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )).decode("ascii")
+
+        text = pdf_text(build_pdf_report_from_structured("https://example.com", report))
+
+        assert "CAPTURE FAILED" in text
+        assert "NOT ANALYSED" in text
+        # The measurements that produced the verdict travel with the figure.
+        assert "71% single flat color" in text
+        # And it says the defect is in the capture, not in this document.
+        assert "not a rendering fault in this report" in text

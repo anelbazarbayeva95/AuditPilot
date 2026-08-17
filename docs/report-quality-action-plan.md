@@ -320,3 +320,32 @@ The review's deepest point is that an audit must disclose its own limits. These 
 Methodology section, not just in this document: one URL, one viewport, one run, no authenticated states,
 no manual verification pass, automated checks only, WCAG target level stated, and an explicit list of
 what each category did not test.
+
+---
+
+## 9. Second review — follow-up (post-Release 1)
+
+A second review of the regenerated sample confirmed the credibility work landed
+(technical credibility 8.5/10, client readiness 7.5/10) and raised seven
+correctness/consistency defects plus a design direction. All seven are fixed:
+
+| # | Issue | Resolution |
+|---|---|---|
+| 1 | Printed arithmetic didn't reproduce the printed total | Weights now print to one decimal with each contribution shown; totals use conventional half-up rounding (`labels.round_half_up`). |
+| 2 | "No issues found" printed under an *insufficient evidence* category | Category text is now keyed off `score_status`; empty Strengths/Weaknesses headings are suppressed entirely when a category wasn't assessed. |
+| 3 | Failed screenshot read as a rendering defect in the report | Rendered as a bounded figure: "CAPTURE FAILED — NOT ANALYSED" label, the measurements behind the verdict, and a caption stating it is preserved diagnostic evidence. |
+| 4 | Copy counts could disagree with what's shown | Counts and rendering both derive from the same result object; the sample generator was what diverged, not the renderer. |
+| 5 | "high or critical" when nothing was critical | Wording now names only the severities actually present. |
+| 6 | Alt-text findings looked like two separate tasks | New `backend/actions.py` consolidates on the *fix*: one action, both categories named, "Closes 2 findings", WCAG 1.1.1 attached. |
+| 7 | "Low Lighthouse performance score" listed as an action | Outcome metrics are held out of the plan as KPI notes; the concrete interventions (named files, measured savings) take their place. |
+
+**Design.** The proposed navy/blue palette was treated as the placeholder it was
+declared to be. AuditPilot already has a distinctive brand (cream `#faf9f5`,
+ink `#16181d`, lime accent, Syne/Instrument Sans), and the real problem was the
+one the review diagnosed — a single hue doing five jobs. See
+`docs/design-system.md` for the semantic system built on the existing brand:
+separate axes for provenance (measured / AI judgment / withheld), severity, and
+score band, each contrast-verified against both surfaces.
+
+**Renderer decision (§4) still open.** The tagging and typography work waits on
+it.
