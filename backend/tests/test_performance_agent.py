@@ -5,8 +5,13 @@ from __future__ import annotations
 import pytest
 
 from agents.performance import PerformanceAgent, PerformanceAgentError
-from lighthouse_runner import LighthouseError
-from models.schemas import AuditCategory, PerformanceCheck, PerformanceMetrics
+from lighthouse_runner import LighthouseError, LighthouseRun
+from models.schemas import (
+    AuditCategory,
+    PerformanceCheck,
+    PerformanceMetrics,
+    PerformanceRunConfig,
+)
 
 
 def good_metrics(**overrides) -> PerformanceMetrics:
@@ -69,7 +74,11 @@ class TestAnalyzePerformance:
 
     async def test_analyze_wraps_into_category_result(self, agent, monkeypatch):
         async def fake_run_lighthouse(url):
-            return good_metrics(lcp_ms=5000)
+            return LighthouseRun(
+                metrics=good_metrics(lcp_ms=5000),
+                run_config=PerformanceRunConfig(form_factor="desktop"),
+                opportunities=[],
+            )
 
         monkeypatch.setattr("agents.performance.run_lighthouse", fake_run_lighthouse)
         category_result = await agent.analyze("https://example.com", {})

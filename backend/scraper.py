@@ -61,6 +61,50 @@ _ELEMENT_HELPERS_SCRIPT = """
             }
             return parts.join(' > ');
         },
+        // innerText, not textContent: textContent concatenates every
+        // descendant text node with no separator, so a heading split across
+        // two spans comes back as one run-together word ("KYLIAN
+        // MBAPPEMERCURIAL SUPERFLY"). innerText respects rendering, and the
+        // whitespace collapse then flattens the line breaks it introduces.
+        visibleText(el) {
+            const raw = (el.innerText || el.textContent || '');
+            return raw.replace(/\\s+/g, ' ').trim();
+        },
+        domExcerpt(el, limit = 220) {
+            const html = (el.outerHTML || '').replace(/\\s+/g, ' ').trim();
+            return html.length > limit ? html.slice(0, limit - 1) + '\\u2026' : html;
+        },
+        // Accessible name in the real precedence order the browser uses:
+        // aria-labelledby > aria-label > content > value > title. The old
+        // check only looked at content/value/aria-label, so a button named
+        // solely by aria-labelledby or title was reported as nameless when it
+        // isn't.
+        accessibleName(el) {
+            const labelledby = (el.getAttribute('aria-labelledby') || '').trim();
+            if (labelledby) {
+                const text = labelledby
+                    .split(/\\s+/)
+                    .map((id) => {
+                        try {
+                            const ref = document.getElementById(id);
+                            return ref ? window.__auditpilot__.visibleText(ref) : '';
+                        } catch (err) { return ''; }
+                    })
+                    .filter(Boolean)
+                    .join(' ')
+                    .trim();
+                if (text) return {name: text, source: 'aria-labelledby'};
+            }
+            const ariaLabel = (el.getAttribute('aria-label') || '').trim();
+            if (ariaLabel) return {name: ariaLabel, source: 'aria-label'};
+            const content = window.__auditpilot__.visibleText(el);
+            if (content) return {name: content, source: 'content'};
+            const value = (el.value || '').trim();
+            if (value) return {name: value, source: 'value'};
+            const title = (el.getAttribute('title') || '').trim();
+            if (title) return {name: title, source: 'title'};
+            return {name: '', source: 'none'};
+        },
         computeSection(el) {
             const landmark = el.closest(
                 'header, nav, footer, main, [role="banner"], [role="navigation"], '
@@ -133,7 +177,15 @@ async def scrape_website(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> Scra
             if response is not None and response.status >= 400:
                 raise ScraperError(f"'{url}' responded with HTTP {response.status}")
 
-            return await _extract_page_data(page, url)
+            # Recorded for the report's Methodology section: which URL was
+            # actually audited (redirects are common and change what "the
+            # page" means) and what it responded with.
+            return await _extract_page_data(
+                page,
+                url,
+                final_url=response.url if response is not None else None,
+                http_status=response.status if response is not None else None,
+            )
     except ScraperError:
         raise
     except Exception as exc:  # noqa: BLE001 - normalize any unexpected failure
@@ -143,7 +195,12 @@ async def scrape_website(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> Scra
             await browser.close()
 
 
-async def _extract_page_data(page, url: str) -> ScrapedPageData:
+async def _extract_page_data(
+    page,
+    url: str,
+    final_url: str | None = None,
+    http_status: int | None = None,
+) -> ScrapedPageData:
     """Pull structured content out of an already-loaded Playwright page."""
 
     await page.evaluate(_ELEMENT_HELPERS_SCRIPT)
@@ -156,10 +213,10 @@ async def _extract_page_data(page, url: str) -> ScrapedPageData:
         meta_description = await meta_el.get_attribute("content")
 
     h1_tags = await page.eval_on_selector_all(
-        "h1", "els => els.map(e => e.textContent.trim()).filter(Boolean)"
+        "h1", "els => els.map(e => window.__auditpilot__.visibleText(e)).filter(Boolean)"
     )
     h2_tags = await page.eval_on_selector_all(
-        "h2", "els => els.map(e => e.textContent.trim()).filter(Boolean)"
+        "h2", "els => els.map(e => window.__auditpilot__.visibleText(e)).filter(Boolean)"
     )
 
     # Note: alt is left as returned by getAttribute — `None` means the attribute
@@ -175,6 +232,7 @@ async def _extract_page_data(page, url: str) -> ScrapedPageData:
             height: e.naturalHeight || null,
             selector: window.__auditpilot__.computeSelector(e),
             section: window.__auditpilot__.computeSection(e),
+            dom_excerpt: window.__auditpilot__.domExcerpt(e),
         }))""",
     )
     images = [
@@ -185,6 +243,7 @@ async def _extract_page_data(page, url: str) -> ScrapedPageData:
             height=img["height"],
             selector=img["selector"],
             section=img["section"],
+            dom_excerpt=img.get("dom_excerpt"),
         )
         for img in raw_images
         if img["src"]
@@ -196,16 +255,20 @@ async def _extract_page_data(page, url: str) -> ScrapedPageData:
     raw_buttons = await page.eval_on_selector_all(
         _BUTTON_SELECTOR,
         """els => els.map(e => {
-            const text = (e.innerText || '').trim();
+            const text = window.__auditpilot__.visibleText(e);
             const value = (e.value || '').trim();
             const ariaLabel = (e.getAttribute('aria-label') || '').trim();
+            const accessible = window.__auditpilot__.accessibleName(e);
             return {
                 text: text || value || ariaLabel || '',
+                accessible_name: accessible.name,
+                name_source: accessible.source,
                 id: e.getAttribute('id') || null,
                 class_name: (e.getAttribute('class') || '').trim() || null,
                 button_type: (e.getAttribute('type') || e.tagName || '').toLowerCase(),
                 selector: window.__auditpilot__.computeSelector(e),
                 section: window.__auditpilot__.computeSection(e),
+                dom_excerpt: window.__auditpilot__.domExcerpt(e),
             };
         })""",
     )
@@ -217,6 +280,9 @@ async def _extract_page_data(page, url: str) -> ScrapedPageData:
             button_type=b["button_type"],
             selector=b["selector"],
             section=b["section"],
+            accessible_name=b.get("accessible_name"),
+            name_source=b.get("name_source"),
+            dom_excerpt=b.get("dom_excerpt"),
         )
         for b in raw_buttons
     ]
@@ -269,6 +335,8 @@ async def _extract_page_data(page, url: str) -> ScrapedPageData:
 
     return ScrapedPageData(
         url=url,
+        final_url=final_url,
+        http_status=http_status,
         title=title or None,
         meta_description=meta_description or None,
         h1_tags=h1_tags,

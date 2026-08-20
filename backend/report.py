@@ -16,14 +16,17 @@ import logging
 import time
 from typing import Awaitable, Callable, Optional
 
+from actions import build_action_plan
 from agents.performance import PerformanceAgent
-from agents.visual import VisualAgent
+from agents.visual import VisualAgent, insufficient_evidence_result
+from labels import humanize, round_half_up
 from models.schemas import (
     AuditCategory,
     AuditResult,
     CategoryResult,
     Recommendation,
     ReportSummary,
+    ScoreStatus,
     StructuredAuditReport,
 )
 from orchestrator import AuditOrchestrator
@@ -32,6 +35,20 @@ from screenshot import PageScreenshots, ScreenshotError, capture_screenshots
 ScreenshotFn = Callable[[str], Awaitable[PageScreenshots]]
 
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# An equal-weight mean is transparent but says that a broken form label and a
+# weak headline matter equally, which isn't true for either users or the
+# business. These weights are declared here, renormalized over whichever
+# categories actually produced a score, and printed in the report — the point
+# isn't that they're the only defensible split, it's that they're visible and
+# arguable instead of implicit.
+CATEGORY_WEIGHTS: dict[str, float] = {
+    "accessibility": 0.25,
+    "performance": 0.25,
+    "seo": 0.20,
+    "copy": 0.15,
+    "visual": 0.15,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +125,17 @@ class ReportBuilder:
             )
             return _failed_category(AuditCategory.VISUAL, exc), None
 
+        # A capture that came back mostly blank can't support a visual
+        # assessment, and assessing it anyway is how a report ends up praising
+        # a hero section that isn't in its own screenshot. Refuse the judgment
+        # rather than make one up.
+        if screenshots.quality is not None and screenshots.quality.is_degraded:
+            logger.info(
+                "visual_agent.skipped url=%s reason=degraded_render detail=%s",
+                url, screenshots.quality.reason,
+            )
+            return insufficient_evidence_result(screenshots.quality), screenshots
+
         try:
             result = await self._visual_agent.analyze(url, {"screenshots": screenshots})
         except Exception as exc:  # noqa: BLE001 - isolate like AuditOrchestrator does
@@ -126,7 +154,12 @@ class ReportBuilder:
 
 def _failed_category(category: AuditCategory, exc: Exception) -> CategoryResult:
     return CategoryResult(
-        category=category, score=None, summary=f"Analysis failed: {exc}", recommendations=[], raw_data=None
+        category=category,
+        score=None,
+        score_status=ScoreStatus.NOT_RUN,
+        summary=f"Analysis failed: {exc}",
+        recommendations=[],
+        raw_data=None,
     )
 
 
@@ -142,17 +175,23 @@ def combine_report(
     (pre-Milestone 11) keep working.
     """
     visual = visual or CategoryResult(
-        category=AuditCategory.VISUAL, score=None, summary="Not run", recommendations=[], raw_data=None
+        category=AuditCategory.VISUAL,
+        score=None,
+        score_status=ScoreStatus.NOT_RUN,
+        summary="Not run",
+        recommendations=[],
+        raw_data=None,
     )
 
-    category_scores = {
-        "accessibility": audit_result.accessibility.score,
-        "seo": audit_result.seo.score,
-        "performance": performance.score,
-        "copy": audit_result.copy.score,
-        "visual": visual.score,
+    categories = {
+        "accessibility": audit_result.accessibility,
+        "seo": audit_result.seo,
+        "performance": performance,
+        "copy": audit_result.copy,
+        "visual": visual,
     }
-    overall_score = _average(list(category_scores.values()))
+    category_scores = {name: result.score for name, result in categories.items()}
+    overall_score, weights, excluded, explanation = _weighted_overall(categories)
 
     recommendations: list[Recommendation] = [
         *audit_result.accessibility.recommendations,
@@ -167,15 +206,19 @@ def combine_report(
     for rec in recommendations:
         issue_counts[rec.severity.value] = issue_counts.get(rec.severity.value, 0) + 1
 
-    unavailable = [category for category, score in category_scores.items() if score is None]
-    if unavailable:
-        logger.info("report.combine categories_unavailable=%s", unavailable)
+    if excluded:
+        logger.info("report.combine categories_excluded=%s", excluded)
+
+    action_plan, kpi_notes = build_action_plan(categories)
 
     return StructuredAuditReport(
         summary=ReportSummary(
             overall_score=overall_score,
             category_scores=category_scores,
             issue_counts=issue_counts,
+            weights=weights,
+            excluded_categories=excluded,
+            score_explanation=explanation,
         ),
         accessibility=audit_result.accessibility,
         seo=audit_result.seo,
@@ -183,14 +226,64 @@ def combine_report(
         copy=audit_result.copy,
         visual=visual,
         recommendations=recommendations,
+        action_plan=action_plan,
+        kpi_notes=kpi_notes,
         screenshot_full_page_base64=_b64(screenshots.full_page_png) if screenshots else None,
         screenshot_viewport_base64=_b64(screenshots.viewport_png) if screenshots else None,
+        screenshot_quality=screenshots.quality if screenshots else None,
     )
 
 
-def _average(scores: list[Optional[float]]) -> Optional[float]:
-    available = [s for s in scores if s is not None]
-    return sum(available) / len(available) if available else None
+def _weighted_overall(
+    categories: dict[str, CategoryResult],
+) -> tuple[Optional[float], dict[str, float], dict[str, str], Optional[str]]:
+    """Weighted overall score, plus the weights, the exclusions, and the arithmetic.
+
+    A category with no score is dropped from the calculation and the weights
+    renormalize over what's left — but the drop is *recorded* rather than
+    silently absorbed. Averaging four categories and presenting the result as
+    an audit of five is the quiet version of overstating coverage.
+    """
+    included: dict[str, float] = {}
+    excluded: dict[str, str] = {}
+
+    for name, result in categories.items():
+        if result.score is not None and result.score_status is ScoreStatus.SCORED:
+            included[name] = CATEGORY_WEIGHTS.get(name, 0.0)
+        elif result.score_status is ScoreStatus.INSUFFICIENT_EVIDENCE:
+            excluded[name] = "insufficient evidence"
+        elif result.summary and result.summary.startswith("Analysis failed:"):
+            excluded[name] = "analysis failed"
+        else:
+            excluded[name] = "not run"
+
+    total_weight = sum(included.values())
+    if not included or total_weight <= 0:
+        return None, {}, excluded, "No category produced a score, so no overall score is reported."
+
+    normalized = {name: weight / total_weight for name, weight in included.items()}
+    overall = sum(categories[name].score * weight for name, weight in normalized.items())
+
+    # The printed arithmetic has to reproduce the printed answer. Rounding the
+    # weights to whole percents doesn't: 29% + 24% + 29% + 18% of those scores
+    # sums to 61.7, not the 61.3 actually computed, so a reader checking the
+    # maths finds it doesn't add up — in a report whose whole argument is that
+    # its numbers are checkable. Weights are shown to one decimal, each
+    # contribution is shown, and the total is stated before rounding.
+    parts = [
+        f"{humanize(name)} {round_half_up(categories[name].score):g} x {weight * 100:.1f}% "
+        f"({categories[name].score * weight:.1f})"
+        for name, weight in normalized.items()
+    ]
+    explanation = (
+        f"Weighted average: {' + '.join(parts)} = {overall:.1f}, "
+        f"reported as {round_half_up(overall):g}/100."
+    )
+    if excluded:
+        excluded_text = ", ".join(f"{humanize(name)} ({why})" for name, why in excluded.items())
+        explanation += f" Excluded: {excluded_text}. Weights renormalized over the rest."
+
+    return round(overall, 1), normalized, excluded, explanation
 
 
 def _b64(png_bytes: bytes) -> str:

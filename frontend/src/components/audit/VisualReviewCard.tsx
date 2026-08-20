@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Image as ImageIcon, Maximize2, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react"
+import { AlertTriangle, Image as ImageIcon, Maximize2, ThumbsDown, ThumbsUp, Wand2 } from "lucide-react"
 
 import { CategoryScoreHeader } from "@/components/audit/CategoryScoreHeader"
 import { InsightGroup } from "@/components/audit/InsightGroupList"
@@ -8,7 +8,7 @@ import { UnavailablePanel } from "@/components/audit/UnavailablePanel"
 import { Card, CardContent } from "@/components/ui/card"
 import { describeUnavailable } from "@/lib/issueText"
 import { isVisualRawData } from "@/lib/rawData"
-import type { AuditCategory, CategoryResult } from "@/types/audit"
+import type { AuditCategory, CategoryResult, ScreenshotQuality } from "@/types/audit"
 
 /**
  * Visual Review section. No on-page screenshot preview/device frame (removed
@@ -24,15 +24,20 @@ export function VisualReviewCard({
   result,
   screenshotViewportBase64,
   screenshotFullPageBase64,
+  screenshotQuality,
 }: {
   id?: string
   result: CategoryResult
   screenshotViewportBase64: string | null
   screenshotFullPageBase64?: string | null
+  /** Measured usability of the capture. A "degraded" capture is documented as a
+   *  failed render, never presented as the page. */
+  screenshotQuality?: ScreenshotQuality | null
 }) {
   const [modalSrc, setModalSrc] = useState<string | null>(null)
   const visualData = isVisualRawData(result.raw_data) ? result.raw_data : null
   const unavailable = result.score === null
+  const withheld = result.score_status === "insufficient_evidence"
   const viewportSrc = screenshotViewportBase64
     ? `data:image/png;base64,${screenshotViewportBase64}`
     : null
@@ -52,7 +57,7 @@ export function VisualReviewCard({
           </span>
           Visual Review
         </div>
-        {screenshotSrc && (
+        {screenshotSrc && !withheld && (
           <button
             type="button"
             onClick={() => setModalSrc(screenshotSrc)}
@@ -73,9 +78,68 @@ export function VisualReviewCard({
         <p className="mt-3 text-[13px] text-muted-foreground">{result.summary}</p>
       )}
 
+      {/* Refusing to assess a bad capture is the product's differentiator, so
+          it is stated as a decision with its measurements — not left looking
+          like a missing section or, worse, a rendering fault in this page. */}
+      {withheld && (
+        <div className="mt-5 rounded-2xl bg-withheld-bg p-5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 size-4 shrink-0 text-withheld" aria-hidden="true" />
+            <div>
+              <div className="font-display text-[15px] font-bold">
+                Assessment withheld — capture did not meet the evidence threshold
+              </div>
+              <p className="mt-1.5 text-[13px] leading-relaxed text-foreground/75">
+                {screenshotQuality?.reason ??
+                  "The page did not finish rendering before capture, so there was nothing reliable to assess."}{" "}
+                No visual score was produced and this category was excluded from the overall score.
+                Re-run the audit to complete coverage.
+              </p>
+              {screenshotQuality && (
+                <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-1.5 text-[11px] text-muted-foreground">
+                  {screenshotQuality.dominant_color_pct != null && (
+                    <div>
+                      <dt className="inline font-semibold">Single flat color: </dt>
+                      <dd className="inline tabular-nums">
+                        {Math.round(screenshotQuality.dominant_color_pct)}%
+                      </dd>
+                    </div>
+                  )}
+                  {screenshotQuality.uniform_row_pct != null && (
+                    <div>
+                      <dt className="inline font-semibold">Rows without variation: </dt>
+                      <dd className="inline tabular-nums">
+                        {Math.round(screenshotQuality.uniform_row_pct)}%
+                      </dd>
+                    </div>
+                  )}
+                  {screenshotQuality.content_top_pct != null && (
+                    <div>
+                      <dt className="inline font-semibold">First content at: </dt>
+                      <dd className="inline tabular-nums">
+                        {Math.round(screenshotQuality.content_top_pct)}% down
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              )}
+              {screenshotSrc && (
+                <button
+                  type="button"
+                  onClick={() => setModalSrc(screenshotSrc)}
+                  className="mt-3 cursor-pointer text-[13px] font-semibold text-link underline-offset-2 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:outline-none"
+                >
+                  View the failed capture (kept as diagnostic evidence)
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       <CardContent className="mt-6 p-0">
         <div className="flex flex-col gap-5">
-          {unavailable ? (
+          {withheld ? null : unavailable ? (
             <UnavailablePanel
               {...describeUnavailable(result.category as AuditCategory, result.summary)}
             />

@@ -4,9 +4,23 @@ import { Eye, Wand2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { IssueDetailModal } from "@/components/audit/IssueDetailModal"
 import { isElevatedSeverity, severityBadgeVariant, severityLabel, severityStripeClass } from "@/lib/score"
-import { buildIssueCardContent, EFFORT_LABEL, looksLikeCode } from "@/lib/issueText"
+import {
+  buildIssueCardContent,
+  EFFORT_LABEL,
+  type EffortTier,
+  getWhyItMatters,
+  hasWhyItMatters,
+  looksLikeCode,
+} from "@/lib/issueText"
 import { cn } from "@/lib/utils"
-import type { Severity } from "@/types/audit"
+import type { EffortLevel, Severity, TimingBand } from "@/types/audit"
+
+/** When this work should be scheduled — derived by the backend from impact, effort and confidence. */
+const TIMING_LABEL: Record<TimingBand, string> = {
+  immediate: "Immediate",
+  next_sprint: "Next sprint",
+  backlog: "Backlog",
+}
 
 /**
  * A single issue card, evidence-first: the real detected element/value (a
@@ -34,6 +48,13 @@ export function IssueItem({
   pageUrl,
   context,
   section,
+  findingsResolved,
+  standard,
+  estimatedSaving,
+  timing,
+  effort: effortOverride,
+  owner,
+  authored,
   className,
 }: {
   /** DOM id — lets the Results page's "in this section" rail jump straight to this card. */
@@ -52,15 +73,54 @@ export function IssueItem({
   context?: string | null
   /** Nearest real landmark ("Header", "Navigation", "Footer", "Main content"), if known. */
   section?: string | null
+  /** How many findings this one fix closes — >1 when it spans categories. */
+  findingsResolved?: number
+  /** The standard this fix satisfies, e.g. a WCAG criterion, supplied by the backend. */
+  standard?: string | null
+  /** Measured saving for performance work — never estimated in the UI. */
+  estimatedSaving?: string | null
+  timing?: TimingBand | null
+  /** Backend-supplied effort. Overrides the local heuristic when present. */
+  effort?: EffortLevel | null
+  /** Only ever set from caller-supplied config; renders as "Unassigned" otherwise. */
+  owner?: string | null
+  /** True when `description` is backend-authored, page-specific text that
+   *  should be shown verbatim rather than passed through local heuristics. */
+  authored?: boolean
   className?: string
 }) {
   const [modalFocus, setModalFocus] = useState<"top" | "fix" | null>(null)
-  const { whyItMatters, recommendedFix, affectedElement, technicalDetails, effort } = buildIssueCardContent(
-    title,
-    description,
-    pageUrl,
-    context
-  )
+  const derived = buildIssueCardContent(title, description, pageUrl, context)
+
+  // Backend-authored text is already specific to this page — it names the real
+  // files and their measured cost. Running it back through the local
+  // heuristics actively damages it: the URL classifier reads main.css out of a
+  // render-blocking recommendation and captions it "Image (nike.com/main.css)",
+  // which is invented evidence of exactly the kind the rest of the product
+  // refuses to produce. So authored actions render their own text verbatim,
+  // with no derived element and no generic why-it-matters filler.
+  const whyItMatters = authored
+    ? hasWhyItMatters(title)
+      ? getWhyItMatters(title)
+      : null
+    : derived.whyItMatters
+  const recommendedFix = authored ? description : derived.recommendedFix
+  const affectedElement = authored ? null : derived.affectedElement
+  const technicalDetails = authored ? [] : derived.technicalDetails
+  const derivedEffort = derived.effort
+  // Prefer the backend's effort: it's the same value the PDF prints, so the
+  // two documents can't quote different numbers for the same work.
+  const effort: EffortTier =
+    effortOverride === "quick" || effortOverride === "moderate" || effortOverride === "involved"
+      ? effortOverride
+      : derivedEffort
+  const metadata = [
+    findingsResolved && findingsResolved > 1 ? `Closes ${findingsResolved} findings` : null,
+    estimatedSaving ? `Saves ${estimatedSaving}` : null,
+    timing ? TIMING_LABEL[timing] : null,
+    standard,
+    owner ? `Owner: ${owner}` : null,
+  ].filter((value): value is string => !!value)
 
   return (
     <>
@@ -68,7 +128,7 @@ export function IssueItem({
         id={id}
         className={cn(
           "relative scroll-mt-24 flex flex-col gap-3 overflow-hidden rounded-[15px] border p-4 pl-5 break-inside-avoid",
-          isElevatedSeverity(severity) && "bg-destructive/[0.03]",
+          isElevatedSeverity(severity) && "bg-severity-high-bg/40",
           className
         )}
       >
@@ -121,16 +181,29 @@ export function IssueItem({
           </div>
         )}
 
-        <div className="line-clamp-2 print:line-clamp-none">
-          <p className="text-xs text-foreground/60">
-            <span className="font-semibold text-foreground/80">Why it matters: </span>
-            {whyItMatters}
-          </p>
-          <p className="text-xs text-foreground/60">
-            <span className="font-semibold text-foreground/80">Recommended fix: </span>
+        <div className="line-clamp-3 print:line-clamp-none">
+          {whyItMatters && (
+            <p className="text-[13px] leading-relaxed text-foreground/70">
+              <span className="font-semibold text-foreground/85">Why it matters: </span>
+              {whyItMatters}
+            </p>
+          )}
+          <p className="text-[13px] leading-relaxed text-foreground/70">
+            <span className="font-semibold text-foreground/85">Recommended fix: </span>
             {recommendedFix}
           </p>
         </div>
+
+        {metadata.length > 0 && (
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground">
+            {metadata.map((entry, index) => (
+              <span key={index} className="flex items-center gap-2.5">
+                {index > 0 && <span aria-hidden="true">·</span>}
+                {entry}
+              </span>
+            ))}
+          </div>
+        )}
 
         <div className="mt-1 flex flex-col gap-2 print:hidden sm:flex-row">
           <button
@@ -158,7 +231,7 @@ export function IssueItem({
           severity={severity}
           effort={effort}
           categoryLabels={categoryLabels}
-          whyItMatters={whyItMatters}
+          whyItMatters={whyItMatters ?? getWhyItMatters(title)}
           recommendedFix={recommendedFix}
           affectedElement={affectedElement}
           location={section}

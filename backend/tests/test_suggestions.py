@@ -10,7 +10,11 @@ from __future__ import annotations
 
 import httpx
 
-from agents.suggestions import enrich_with_ai_suggestions
+from agents.suggestions import (
+    _is_alt_text_finding,
+    _is_title_finding,
+    enrich_with_ai_suggestions,
+)
 from gemini_client import GeminiClientError
 from models.schemas import AuditCategory, CategoryResult, Recommendation, ScrapedPageData, Severity
 
@@ -209,3 +213,45 @@ class TestAltTextSuggestion:
             await http_client.aclose()
 
         assert new_a11y.recommendations[0].ai_suggestion is None
+
+
+class TestFindingMatching:
+    """Enrichment must key off rule_id, not the editorial title.
+
+    Titles are report copy and have been reworded once already; matching on
+    them silently switched this whole pass off when that happened.
+    """
+
+    async def test_matches_real_agent_output(self):
+        """The titles and rule ids the agents actually emit today."""
+        from agents.accessibility import AccessibilityAgent
+        from models.schemas import ImageData
+
+        page = make_page(images=[ImageData(src="https://example.com/hero.png", alt=None)])
+        result = await AccessibilityAgent().analyze("https://example.com", {"page_data": page})
+        alt_recs = [r for r in result.recommendations if _is_alt_text_finding(r)]
+
+        assert len(alt_recs) == 1
+        assert alt_recs[0].rule_id == "missing_alt_text"
+
+    def test_rule_id_takes_precedence_over_title(self):
+        rec = Recommendation(
+            title="Some reworded label", description="d", severity=Severity.HIGH,
+            category=AuditCategory.ACCESSIBILITY, rule_id="missing_page_title",
+        )
+
+        assert _is_title_finding(rec)
+
+    def test_falls_back_to_title_when_rule_id_is_absent(self):
+        """Recommendations built before rule_id existed still enrich."""
+        assert _is_title_finding(title_rec("Missing Page Title"))
+        assert _is_alt_text_finding(alt_text_rec("Missing Alt Text", "https://x/i.png"))
+
+    def test_unrelated_findings_are_not_matched(self):
+        rec = Recommendation(
+            title="Button with no accessible name", description="d", severity=Severity.HIGH,
+            category=AuditCategory.ACCESSIBILITY, rule_id="empty_button",
+        )
+
+        assert not _is_title_finding(rec)
+        assert not _is_alt_text_finding(rec)

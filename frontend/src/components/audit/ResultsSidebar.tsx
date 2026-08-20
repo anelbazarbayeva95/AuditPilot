@@ -11,6 +11,7 @@ export type SectionId =
   | "copy"
   | "charts"
   | "actions"
+  | "methodology"
 
 interface NavItemDef {
   id: SectionId
@@ -33,6 +34,8 @@ export const SECTION_ORDER: NavItemDef[] = [
   { id: "performance", label: "Performance", scoreKey: "performance" },
   { id: "copy", label: "Copy", scoreKey: "copy" },
   { id: "charts", label: "Charts" },
+  // Last, but present: a score a reader cannot reproduce is an assertion.
+  { id: "methodology", label: "Methodology" },
 ]
 
 /** Scrolls to a sub-block within the currently-active section — used by the

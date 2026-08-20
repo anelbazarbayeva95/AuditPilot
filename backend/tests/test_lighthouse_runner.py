@@ -10,7 +10,12 @@ import stat
 
 import pytest
 
-from lighthouse_runner import LighthouseError, _find_installed_chromium, run_lighthouse
+from lighthouse_runner import (
+    LIGHTHOUSE_PRESET,
+    LighthouseError,
+    _find_installed_chromium,
+    run_lighthouse,
+)
 
 GOOD_REPORT = {
     "categories": {"performance": {"score": 0.75}},
@@ -77,12 +82,12 @@ async def test_success_reads_report_from_output_file(monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
-    metrics = await run_lighthouse("https://example.com")
+    run = await run_lighthouse("https://example.com")
 
-    assert metrics.performance_score == 75.0
-    assert metrics.lcp_ms == 2100.0
-    assert metrics.cls == 0.05
-    assert metrics.inp_ms == 180.0
+    assert run.metrics.performance_score == 75.0
+    assert run.metrics.lcp_ms == 2100.0
+    assert run.metrics.cls == 0.05
+    assert run.metrics.inp_ms == 180.0
 
 
 async def test_output_file_is_cleaned_up(monkeypatch):
@@ -182,3 +187,137 @@ class TestFindInstalledChromium:
     def test_returns_none_when_nothing_installed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty"))
         assert _find_installed_chromium(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Run conditions and opportunities
+# ---------------------------------------------------------------------------
+
+DETAILED_REPORT = {
+    "lighthouseVersion": "12.2.1",
+    "fetchTime": "2026-08-17T04:09:00.000Z",
+    "finalDisplayedUrl": "https://example.com/",
+    "categories": {"performance": {"score": 0.25}},
+    "configSettings": {
+        "formFactor": "desktop",
+        "throttlingMethod": "simulate",
+        "throttling": {"downloadThroughputKbps": 10240, "cpuSlowdownMultiplier": 1},
+        "screenEmulation": {"width": 1350, "height": 940, "deviceScaleFactor": 1},
+    },
+    "environment": {"networkUserAgent": "Mozilla/5.0 Chrome/124"},
+    "audits": {
+        "largest-contentful-paint": {"numericValue": 6480.0},
+        "cumulative-layout-shift": {"numericValue": 0.31},
+        "interaction-to-next-paint": {"numericValue": 420.0},
+        "first-contentful-paint": {"numericValue": 2100.0},
+        "total-blocking-time": {"numericValue": 1180.0},
+        "render-blocking-resources": {
+            "score": 0.2,
+            "title": "Eliminate render-blocking resources",
+            "details": {
+                "overallSavingsMs": 1240,
+                "items": [
+                    {"url": "https://example.com/main.css", "wastedMs": 800},
+                    {"url": "https://example.com/vendor.js", "wastedMs": 440},
+                ],
+            },
+        },
+        "unused-javascript": {
+            "score": 0.3,
+            "title": "Reduce unused JavaScript",
+            "details": {"overallSavingsMs": 860, "overallSavingsBytes": 524288,
+                        "items": [{"url": "https://example.com/analytics.js"}]},
+        },
+        # A passing audit must not be reported as an opportunity.
+        "uses-text-compression": {"score": 1, "title": "Enable text compression", "details": {}},
+    },
+}
+
+
+async def _run_with_report(monkeypatch, report):
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        with open(_output_path_from_cmd(cmd), "w", encoding="utf-8") as f:
+            json.dump(report, f)
+        fake_create_subprocess_exec.cmd = cmd
+        return _FakeProcess(returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    run = await run_lighthouse("https://example.com")
+    return run, fake_create_subprocess_exec.cmd
+
+
+async def test_form_factor_is_set_explicitly_not_inherited(monkeypatch):
+    """Lighthouse's CLI default is mobile; the rest of the pipeline renders desktop.
+
+    Inheriting the default published a mobile-throttled score next to a desktop
+    screenshot with nothing disclosing the mismatch.
+    """
+    _, cmd = await _run_with_report(monkeypatch, GOOD_REPORT)
+
+    assert f"--preset={LIGHTHOUSE_PRESET}" in cmd
+
+
+async def test_run_conditions_are_recorded(monkeypatch):
+    run, _ = await _run_with_report(monkeypatch, DETAILED_REPORT)
+    config = run.run_config
+
+    assert config.lighthouse_version == "12.2.1"
+    assert config.form_factor == "desktop"
+    assert config.runs == 1
+    assert config.fetch_time == "2026-08-17T04:09:00.000Z"
+    assert config.final_url == "https://example.com/"
+    assert config.screen_emulation == "1350x940 @1x"
+    assert "simulate" in config.throttling
+    assert "10240 kbps down" in config.throttling
+
+
+async def test_unthrottled_runs_say_so(monkeypatch):
+    report = dict(DETAILED_REPORT)
+    report["configSettings"] = {"formFactor": "desktop", "throttlingMethod": "provided",
+                                "throttling": {}}
+    run, _ = await _run_with_report(monkeypatch, report)
+
+    assert "unthrottled" in run.run_config.throttling
+
+
+async def test_supporting_metrics_are_captured(monkeypatch):
+    run, _ = await _run_with_report(monkeypatch, DETAILED_REPORT)
+
+    assert run.metrics.fcp_ms == 2100.0
+    assert run.metrics.tbt_ms == 1180.0
+
+
+async def test_opportunities_name_real_resources_and_savings(monkeypatch):
+    """"Audit render-blocking resources" is homework; this is a fix."""
+    run, _ = await _run_with_report(monkeypatch, DETAILED_REPORT)
+
+    by_id = {o.audit_id: o for o in run.opportunities}
+    blocking = by_id["render-blocking-resources"]
+
+    assert blocking.savings_ms == 1240
+    assert blocking.resources == [
+        "https://example.com/main.css", "https://example.com/vendor.js"
+    ]
+    assert by_id["unused-javascript"].savings_bytes == 524288
+
+
+async def test_passing_audits_are_not_reported_as_opportunities(monkeypatch):
+    run, _ = await _run_with_report(monkeypatch, DETAILED_REPORT)
+
+    assert "uses-text-compression" not in {o.audit_id for o in run.opportunities}
+
+
+async def test_opportunities_are_ranked_by_saving(monkeypatch):
+    run, _ = await _run_with_report(monkeypatch, DETAILED_REPORT)
+
+    savings = [o.savings_ms for o in run.opportunities]
+    assert savings == sorted(savings, reverse=True)
+
+
+async def test_report_without_config_still_parses(monkeypatch):
+    """An older or trimmed Lighthouse report must not break the audit."""
+    run, _ = await _run_with_report(monkeypatch, GOOD_REPORT)
+
+    assert run.metrics.performance_score == 75.0
+    assert run.run_config.form_factor is None
+    assert run.opportunities == []

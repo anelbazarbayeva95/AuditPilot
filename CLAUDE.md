@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AuditPilot: an agentic website-auditing platform. Given a single URL, it scrapes the page with Playwright, runs five analysis agents (Accessibility, SEO, Performance, Copy, Visual) in parallel, and renders a decision-oriented report in a React dashboard. Two independent apps, no shared tooling: `backend/` (FastAPI + Python) and `frontend/` (React + Vite + TypeScript).
 
+The product's distinguishing claim is not coverage but **credibility**: every score is traceable to a printed measurement or an explicit "insufficient evidence", and the audit declines to judge what it couldn't observe. Most of the non-obvious code exists to hold that line — read `docs/report-quality-action-plan.md` before changing scoring, evidence handling, or report structure. It records what two external reviews found, what was verified against the code, and which items were deliberately *not* implemented as stated and why. `docs/design-system.md` covers the visual semantics.
+
+Open decision: the PDF renderer. ReportLab cannot produce a tagged PDF/UA document, which caps how far the report's design and accessibility can go; §4 of the action plan sets out the migration choice, and the typography/tagging work is parked behind it.
+
 ## Commands
 
 ### Backend (`backend/`)
@@ -21,7 +25,7 @@ Tests: `pytest -v` (or `pytest -q`). Run one file: `pytest tests/test_accessibil
 
 Requires `GEMINI_API_KEY` in `backend/.env` (copy from `.env.example`) only for agents that actually call Gemini at runtime (Copy, Visual, the suggestion-enrichment pass) — `GeminiClient` doesn't validate the key until the first real call, so importing/unit-testing any agent works without one. As of 2026, AI Studio issues `AQ.`-prefixed "Auth keys" rather than the older `AIza...` format; both work with this project's `google-genai`-based client.
 
-The Performance agent additionally shells out to `npx lighthouse` at runtime, so it needs Node.js/`npx` on `PATH` — this is separate from the Python venv and isn't installed by `pip install`. PDF export (`/report/pdf`) uses ReportLab, which is in `requirements.txt`.
+The Performance agent additionally shells out to `npx lighthouse` at runtime, so it needs Node.js/`npx` on `PATH` — this is separate from the Python venv and isn't installed by `pip install`. PDF export (`/report/pdf`) uses ReportLab, which is in `requirements.txt`; Pillow arrives transitively with it, and `render_quality.py` depends on that (it degrades to a `"unknown"` verdict rather than failing if Pillow is somehow absent).
 
 CORS is locked to `ALLOWED_ORIGINS` (comma-separated, in `.env`/`.env.example`), defaulting to `http://localhost:5173` — set it to the real frontend origin(s) in production. `main.py` logs both `GEMINI_API_KEY` presence and `npx` presence at startup, so a misconfigured deployment (missing key, missing Node) is visible in logs immediately rather than only surfacing per-audit.
 
@@ -35,7 +39,15 @@ npm run build           # tsc -b && vite build
 npm run lint            # oxlint
 ```
 
-No frontend test runner is configured. There's no `--emptyOutDir` in normal use, so if you need a scratch build to inspect output without touching the tracked `dist/`, pass `--outDir` to `vite build` explicitly.
+No frontend test runner is configured, so `npx tsc -b --noEmit` plus `npm run build` is the whole automated safety net — anything beyond type-correctness has to be verified by actually looking at the page (see "Verifying changes" below). There's no `--emptyOutDir` in normal use, so if you need a scratch build to inspect output without touching the tracked `dist/`, pass `--outDir` to `vite build` explicitly.
+
+### Verifying changes
+
+Two things in this repo are easy to break in ways no unit test catches, because both are *rendered output*:
+
+**The PDF.** `tests/test_pdf_report.py` decompresses the generated PDF's content streams and recovers its text layer (`pdf_page_texts()` / `pdf_text()`), so assertions can be made about what a reader actually sees — metadata, page numbers, no duplicated findings, no raw enum names outside the appendix. Reuse those helpers rather than asserting `startswith(b"%PDF")`, which is true of a badly broken document. Note the extractor emits each glyph run separately, so escaped markup comes back as `< title >`; normalize before matching.
+
+**The dashboard.** It needs a finished report in router state, which normally means a full audit. To drive it without a backend: build, `npm run preview`, then in Playwright load `/`, `history.replaceState({usr: {report, url}}, '', '/results')`, and dispatch a `popstate` event — react-router picks it up. Chromium is at `/opt/pw-browsers/chromium`. Doing this caught defects that typechecking cannot: a URL heuristic captioning `main.css` as "Image (nike.com/main.css)", and "3 quick win".
 
 ## Architecture
 
@@ -48,8 +60,11 @@ The frontend only uses one path: `POST /report/jobs` (returns a job id immediate
 1. `scraper.py` renders the page once with Playwright and extracts `ScrapedPageData` (title, meta, headings, images, buttons, links, inputs, open graph tags) — every element-level field (`selector`, `section`, `width`/`height`) is computed from the live DOM via a small injected JS helper (`_ELEMENT_HELPERS_SCRIPT`), never guessed.
 2. Accessibility, SEO, Copy, Performance, and Visual all run concurrently against that shared scrape (`asyncio.gather`). `screenshot.py` captures full-page + viewport PNGs for the Visual agent.
 3. Each agent is wrapped in `run_agent_safely()` (`orchestrator.py`) — one agent failing (Gemini down, Lighthouse unavailable, scrape partially incomplete) produces `CategoryResult(score=None, summary="Analysis failed: ...")` instead of failing the whole job. `jobs.py`'s per-step `progress` dict reflects this so the frontend's progress page shows real state, not a simulated loader.
+
+   Visual is the one agent that can be skipped deliberately rather than only on failure. `render_quality.py` measures the captured viewport PNG (dominant-colour share, share of uniform rows, how far down the first content-bearing row appears) and returns a `ScreenshotQuality`; a `degraded` verdict means the page didn't finish rendering, and both `report.py` and `jobs.py` then return `insufficient_evidence_result()` instead of running Gemini over a blank image. That category gets `score_status=INSUFFICIENT_EVIDENCE`, is excluded from the overall score with the exclusion recorded in `ReportSummary.excluded_categories`, and the PDF prints the capture with a disclosure box rather than as evidence about the page. This exists because a real audit did the opposite: it described a "large, centrally placed headline" in a screenshot that was 71% one flat colour with no content in the top 82%.
 4. After Accessibility/SEO complete, `agents/suggestions.py`'s `enrich_with_ai_suggestions()` runs as a best-effort post-process: it asks Gemini for a suggested `<title>` (only when there's a real signal to base it on — h1s/meta description/og:title, never invented from just a domain) and, for a bounded number of missing-alt-text images, fetches the real image bytes and asks Gemini's vision model to describe them. Every failure mode here (no key, network, bad content-type, empty response) just leaves `Recommendation.ai_suggestion` unset — this pass never fails the job.
-5. `report.py`'s `combine_report()` merges everything into one `StructuredAuditReport` (pure function, unit-testable without running any agent) — overall score, per-category scores, a flat cross-category `recommendations` list, and base64-encoded screenshots.
+5. `report.py`'s `combine_report()` merges everything into one `StructuredAuditReport` (pure function, unit-testable without running any agent) — overall score, per-category scores, a flat cross-category `recommendations` list, and base64-encoded screenshots. The overall score is a **weighted** mean (`CATEGORY_WEIGHTS`, declared in `report.py` and printed in the report's Methodology section), not a flat average: a category that produced no score is dropped, the remaining weights renormalize, and the drop is recorded in `excluded_categories` so a four-category audit never presents itself as a five-category one. `ReportSummary.score_explanation` carries the arithmetic.
+6. `jobs.py` attaches a `RunContext` — resolved URL, HTTP status, viewport, user agent, Lighthouse version/form factor/throttling, WCAG target, and `SCOPE_LIMITATIONS` — to the finished report. This is what the PDF's Methodology section renders; without it a score is an assertion rather than something a reader can reproduce.
 
 `browser_defaults.py` centralizes the Playwright context fingerprint (desktop Chrome UA, `en-US` locale, 1280×900 viewport) shared by `scraper.py` and `screenshot.py` — Playwright's default headless identity gets outright blocked (HTTP 403) by some real sites, so both modules present the same realistic browser identity rather than the default headless one.
 
@@ -57,30 +72,80 @@ The frontend only uses one path: `POST /report/jobs` (returns a job id immediate
 
 Every audit path funnels through `scraper.py`'s `scrape_website()`, which calls `url_safety.ensure_public_url()` as its first step — an SSRF guard that resolves the URL's hostname and rejects it if any resolved IP is non-public (private/loopback/link-local/cloud-metadata ranges, both IPv4 and IPv6). This is the single choke point for the whole pipeline since Performance/Visual only run after a scrape has already succeeded. Known gap: it checks DNS at call time, not at actual browser-connection time, so DNS rebinding isn't covered — closing that fully would need pinning the resolved IP into Playwright's navigation, which it doesn't expose cleanly.
 
-`report.py`'s `combine_report()` output also feeds `pdf_report.py`, which builds the same content as a downloadable ReportLab PDF (`POST /report/pdf`) — Executive Summary, one section per category including Visual with an embedded screenshot, and a severity-sorted recommendations list.
+`report.py`'s `combine_report()` output also feeds `pdf_report.py`, which builds the same content as a downloadable ReportLab PDF (`POST /report/pdf`). Its section order is deliberate — Cover → Executive summary + scorecard → Priority action plan → Category findings → Methodology → Appendix — so a reader who stops early still has the result and the plan, and one who wants to check the work can reach the evidence. Three rules hold throughout: nothing is printed twice (the action plan is a ranked, cross-category de-duplicated *synthesis*, not a second copy of every finding — the old trailing "Recommendations" section repeated the lot); machine identifiers never reach prose (everything user-visible goes through `labels.humanize()`, raw rule ids and selectors live in the appendix); and measured facts are visibly distinguished from model judgments via each finding's `detection`/`confidence`. The document carries real metadata, `/Lang`, outline bookmarks, and `Page N of M` footers, and dynamic text is escaped through `_esc()` — findings quote real markup like `<title>`, which ReportLab's parser would otherwise swallow.
+
+Note that ReportLab has no practical route to a fully tagged, PDF/UA-conformant document; metadata, language, and bookmarks are as far as this renderer goes. Closing that gap needs a different renderer — see `docs/report-quality-action-plan.md` §4.
 
 ### The "no fabrication" data model
 
 `Recommendation` (`models/schemas.py`) is the unit everything downstream renders: `title`, `description`, `severity`, `category`, plus real evidence fields — `context` (distinguishing value: an image src, a CSS selector, a form field name), `selector` (computed CSS selector, only set when the check is element-level), `section` (nearest landmark ancestor: Header/Navigation/Footer/Main content), and `ai_suggestion` (Gemini-generated, only ever a suggestion, never asserted as fact). Every one of these is `None` rather than guessed when the real value isn't known — e.g. page-level checks like "Missing Title" have no `selector`, because there's only one `<title>` tag to point to. When extending an agent, follow this pattern rather than inventing a plausible-looking value.
 
-`agents/scoring.py` has the shared 0-100 scoring logic (with a per-check deduction cap so e.g. 20 missing-alt-text images can't alone zero out the whole Accessibility score) used by the rule-based agents.
+It also carries provenance and planning fields, all under the same rule: `wcag_criterion` (from a fixed per-check map in `agents/accessibility.py`, so PDF and UI cite the same criterion), `rule_id` (the stable key — prefer it over `title`, which is editorial), `detection`, `confidence`, `impact`/`effort`/`timing`, `validation`, `owner`, and `evidence` (`dom_excerpt`, `accessible_name_computation`, `measured_value`, `threshold`). `CategoryResult` adds `score_status` (`scored` / `insufficient_evidence` / `not_run` — "we declined to judge" and "the agent crashed" are different claims), `score_explanation`, and `coverage` (`CategoryCoverage.checks_run` / `checks_not_covered`). That last one is what lets a clean SEO run say "no issues across the 6 on-page checks performed, 10 areas not tested" instead of the unsupportable "no SEO issues detected".
+
+The scraper backs these fields with real DOM data: headings use `innerText` plus a whitespace collapse (`textContent` concatenates sibling text nodes with no separator, which is how two heading lines become one run-together word), and buttons carry a real `accessible_name` resolved in browser precedence order — aria-labelledby > aria-label > content > value > title — so a button named only by `aria-labelledby` is no longer reported as nameless.
+
+`agents/scoring.py` has the shared 0-100 scoring logic (with a per-check deduction cap so e.g. 20 missing-alt-text images can't alone zero out the whole Accessibility score) used by the rule-based agents. `score_with_explanation()` returns the score *and* a one-line derivation ("100 - [7 x button with no accessible name = -70 (capped at -30)] = 70") that lands in `CategoryResult.score_explanation` and is printed under each category — "how do seven issues become 70?" has to be answerable from the report, not from this file. A category containing an unresolved critical finding is additionally capped at `CRITICAL_FAILURE_SCORE_CAP` (50), stated in the explanation wherever it applies.
+
+`agents/prioritization.py` maps each `rule_id` to impact, effort, and a validation method, and *derives* timing from impact + effort + confidence rather than storing it. Severity alone can't drive a plan — a high-severity issue on one obscure element and a medium issue repeated across every template need different treatment. `owner` is deliberately never inferred: it's only ever populated from caller-supplied configuration and renders as "Unassigned" otherwise.
+
+`labels.py` is the single source of human-readable text for machine identifiers. `humanize()` exists because `.replace("_", " ").title()` produces "Cta Quality" and "Slow Lcp"; `pluralize()` because "7 issue(s) found" is unedited system output. It also owns `round_half_up()` (Python's `round`/`%.0f` round halves to *even*, so 62.5 would display as 62 in a report that prints its own arithmetic) and `SCORE_BANDS`/`score_band()`, the 0-39/40-69/70-89/90-100 scale printed beside every score. Every renderer goes through this module, so machine names appear only in the PDF's appendix and in the JSON.
+
+### Findings vs. actions
+
+These are different objects and conflating them is the main modelling trap here. A `Recommendation` is a *finding* — one problem observed on one element. An `ActionItem` (`actions.py`) is a *fix*, and one fix can close several findings across several categories: adding an `alt` attribute resolves both an Accessibility and an SEO finding with a single edit, so listing it twice misrepresents the work.
+
+`build_action_plan()` therefore consolidates on the remedy, not the finding, via `_ACTION_BY_RULE` (rule ids → one canonical action carrying its own title, description and standard). Unmapped rules become their own action keyed by `rule_id`, so a newly added check is never silently merged into an unrelated fix. Merging always takes the *most* urgent characterization of any finding it absorbs and the *harder* effort estimate — consolidation must not quietly downgrade a problem.
+
+Two rules the plan enforces:
+
+- **Outcome metrics are never actions.** "Lighthouse performance score is 25/100" is a symptom of the render-blocking JavaScript beneath it; "improve the Lighthouse score" is not a task anyone can pick up. `_is_outcome_metric()` diverts these into `kpi_notes` — stated as the success measure so their absence reads as a decision, not an omission.
+- **Performance work comes from measured opportunities**, not from threshold findings: Lighthouse already knows which file blocks the render and what deferring it saves, so the action names the file and the saving.
+
+`combine_report()` attaches the plan to the report, and both the PDF and the dashboard render *that* — they cannot disagree about what the plan is. `pdf_report.py` and `lib/summary.ts`'s `actionsOf()` both fall back to deriving one when the field is absent (older payloads), since an empty plan would read as "nothing to do".
+
+### The title trap
+
+`Recommendation.title` is editorial and has already been reworded once. Several places used to key off it, and every one of them broke silently when it changed:
+
+- `agents/suggestions.py` matched titles to decide which findings get an AI suggestion — the whole enrichment pass switched itself off. It now matches `rule_id`, with titles kept only as a fallback for older payloads.
+- `lib/issueText.ts`'s presentation maps are keyed by the *original* machine-derived titles; lookups normalize through `legacyTitleKey()`.
+
+**Key off `rule_id` in anything new.** Ids are the contract; titles are copy.
 
 ### Frontend structure
 
 Three routes via react-router: `/` (`UrlInputPage`, starts a job) → `/progress` (`AuditProgressPage`, polls the job) → `/results` (`AuditResultsPage`). A direct load of `/progress` or `/results` with no job/report in router state redirects back to `/` — there is no mock/placeholder data path.
 
-`AuditResultsPage` is a 3-column "Docs Layout," not a single scrolling page: `ResultsSidebar` (left) switches which `SectionId` is mounted — only the active section exists in the DOM at a time — and `ResultsSubNav` (right) shows jump links scoped to whatever the active section actually rendered. Section order is Executive Summary → Action list → Visual → Accessibility → SEO → Performance → Copy → Charts; the Action list sits right after the summary deliberately, as the primary decision-making section rather than the last thing reached.
+`AuditResultsPage` is a 3-column "Docs Layout," not a single scrolling page: `ResultsSidebar` (left) switches which `SectionId` is mounted — only the active section exists in the DOM at a time — and `ResultsSubNav` (right) shows jump links scoped to whatever the active section actually rendered. Section order is Executive Summary → Action list → Visual → Accessibility → SEO → Performance → Copy → Charts → Methodology; the Action list sits right after the summary deliberately, as the primary decision-making section rather than the last thing reached, and Methodology closes the set for the same reason the PDF has one.
+
+`ExecutiveSummary` leads with three derived messages — primary risk, largest *measured* opportunity, audit confidence — before any finding detail, because the report's job is to say what the reader now knows and should do, not what the scanner found. `lib/summary.ts` computes them; it returns `null` for an opportunity with no quantified saving rather than claiming a vague one.
 
 Two different card families render findings, chosen per category by whether repeated element-level findings are possible:
 - **Accessibility and SEO** use `GroupedFindingsSection` + `FindingCard` + `FindingDrawer` — findings are grouped by title (`groupFindingsByTitle`, `lib/issueText.ts`) so e.g. 8 empty buttons render as one card with an occurrence count instead of 8 identical ones. Clicking a card opens `FindingDrawer`, a hand-rolled right-side panel (no Radix Dialog/Sheet in this repo — manual focus trap + Escape handling, see the pattern in `FindingDrawer.tsx`) with the full evidence/fix/reference.
 - **Performance** stays on the plain `CategoryCard` + `RecommendationList` + `IssueItem`, since its findings are each a distinct metric (LCP/CLS/INP) and don't repeat per element.
-- The cross-category **Action list** (`PrioritizedRecommendations` + `IssueItem`) merges the same underlying issue when more than one agent flags it (`dedupeRecommendations`, matches by embedded resource URL first, then by title) and orders by severity then by how quick the fix is (`effortFor`).
+- The cross-category **Action list** (`PrioritizedRecommendations` + `IssueItem`) renders the backend's `action_plan` (see "Findings vs. actions"). `dedupeRecommendations`/`effortFor` remain only as the fallback path for reports that predate that field.
+
+`IssueItem` takes an `authored` flag for backend-written text. Without it the component runs the description through local heuristics (`buildIssueCardContent`, `classifyResourceUrl`) that were built for terse rule messages — on an action description those actively damage it, reading `main.css` out of a render-blocking recommendation and captioning it "Image (nike.com/main.css)", which is invented evidence of exactly the kind the backend refuses to produce. Authored text renders verbatim, with no derived element and no generic why-it-matters filler (`hasWhyItMatters()` decides whether the line appears at all).
 
 All finding cards are evidence-first: the real detected element/value renders in a prominent "Detected" block (quoted for real content like headings/labels/filenames, monospace for selectors/raw metrics — `looksLikeCode()`) before the explanatory why-it-matters/recommended-fix text, which is secondary. `resolveAffectedElement()`/`occurrenceElement()` (`lib/issueText.ts`) are what compute that evidence value — prefer the backend's structured `context`/`selector` fields, only falling back to parsing the description text for the few paths that don't carry one yet.
 
-`lib/issueText.ts` is the single source of truth for presentation-only text: why-it-matters/recommended-fix/effort-tier copy, WCAG references, and fix explanations are all static maps keyed by the finite set of check/dimension titles the backend can produce (see the `*Check`/`*Dimension` enums in `models/schemas.py`) — an unrecognized title falls back to generic text rather than breaking. `types/audit.ts` is a hand-written mirror of `models/schemas.py`; there's no codegen, so backend schema changes must be reflected there manually.
+`lib/issueText.ts` is the single source of truth for presentation-only text: why-it-matters/recommended-fix/effort-tier copy, WCAG references, and fix explanations are all static maps keyed by the finite set of check/dimension titles the backend can produce (see the `*Check`/`*Dimension` enums in `models/schemas.py`) — an unrecognized title falls back to generic text rather than breaking. Those maps are keyed by the *older* machine-derived titles ("Empty Button", "Cta Quality"); the backend now sends edited labels, so every lookup normalizes through `legacyTitleKey()`. New call sites should key off `Recommendation.rule_id` instead — ids are the stable contract, titles are editorial. Where the backend supplies a value directly (`wcag_criterion`), prefer it over the local map so the two can't drift.
 
-Severity has a shared visual language across every card (`lib/score.ts`): `severityStripeClass`/`isElevatedSeverity` give critical/high findings a colored left accent + tinted background that medium/low findings don't get, so hierarchy reads at a glance rather than every card looking identical.
+`types/audit.ts` is a hand-written mirror of `models/schemas.py`; there's no codegen, so backend schema changes must be reflected there manually.
+
+### Design tokens
+
+`index.css` defines the semantic vocabulary; `lib/score.ts` maps data to it. Full rationale in `docs/design-system.md`, but the load-bearing rule is **one hue, one job** — the system was rebuilt because a single lime was simultaneously brand, CTA, success, status and focus ring, which is what made the palette read as decoration rather than meaning.
+
+Three independent axes, none borrowing from another:
+
+- **Provenance** — `--measured` (teal) / `--judgment` (violet) / `--withheld` (slate). This is the product's differentiator made visible: a measurement, a model's opinion, and a refusal to judge are three different claims. `provenanceOf()` derives it from `Recommendation.detection`.
+- **Severity** — `--severity-critical` … `--severity-low`. Critical and high are now distinct reds; they used to share one, flattening the scale where it matters most.
+- **Score band** — four bands whose thresholds must match `labels.SCORE_BANDS` in the backend, since the PDF prints the scale.
+
+`--primary` (lime) is brand and primary action only, never a status and never text — it is 1.4:1 on cream. Every text token clears 4.5:1 on both cream and white; re-verify before adding one. Nothing is distinguished by colour alone — provenance chips carry a word and an icon, severities carry a text badge.
+
+Severity also has a shared structural language across every card: `severityStripeClass`/`isElevatedSeverity` give critical/high findings a coloured left accent + tinted background that medium/low don't get, so hierarchy reads at a glance rather than every card looking identical.
 
 ## Deployment
 

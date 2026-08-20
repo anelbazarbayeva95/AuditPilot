@@ -20,18 +20,24 @@ import asyncio
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from agents import AccessibilityAgent, CopyAgent, SEOAgent, VisualAgent
 from agents.performance import PerformanceAgent
 from agents.suggestions import enrich_with_ai_suggestions
+from agents.visual import insufficient_evidence_result
+from browser_defaults import DESKTOP_USER_AGENT, DESKTOP_VIEWPORT
 from gemini_client import GeminiClient
 from models.schemas import (
     AuditCategory,
     AuditResult,
     AuditStatus,
     CategoryResult,
+    PerformanceRunConfig,
     ReportJob,
+    RunContext,
+    ScoreStatus,
     ScrapedPageData,
 )
 from orchestrator import run_agent_safely
@@ -39,12 +45,57 @@ from report import combine_report
 from scraper import ScraperError, scrape_website
 from screenshot import PageScreenshots, capture_screenshots
 
+# Stated in every report so its conclusions carry their own limits rather than
+# implying a breadth the run never had.
+SCOPE_LIMITATIONS = [
+    "A single URL was audited; other pages and templates were not tested.",
+    "One rendered desktop viewport; mobile and other breakpoints were not tested.",
+    "Unauthenticated public page only; no logged-in or personalized states.",
+    "Automated checks and model judgment only; no manual verification pass.",
+    "Performance is a single lab run, not field data from real users.",
+]
+
+REPORT_VERSION = "1.0"
+
 ScrapeFn = Callable[[str], Awaitable[ScrapedPageData]]
 ScreenshotFn = Callable[[str], Awaitable[PageScreenshots]]
 
 _STEPS = ("scrape", "accessibility", "seo", "copy", "performance", "visual")
 
 logger = logging.getLogger(__name__)
+
+
+def _build_run_context(
+    url: str,
+    started_at: datetime,
+    page_data: ScrapedPageData,
+    performance: CategoryResult,
+) -> RunContext:
+    """Record how this audit was actually produced.
+
+    Everything here is read back from the run rather than assumed: the URL that
+    was really landed on, the status it returned, and the conditions Lighthouse
+    reported for itself. That's what makes the report's numbers reproducible
+    instead of merely stated.
+    """
+    performance_run = None
+    raw = performance.raw_data or {}
+    if isinstance(raw.get("run_config"), dict):
+        performance_run = PerformanceRunConfig(**raw["run_config"])
+
+    return RunContext(
+        started_at=started_at,
+        finished_at=datetime.now(timezone.utc),
+        requested_url=url,
+        final_url=page_data.final_url,
+        http_status=page_data.http_status,
+        viewport=f"{DESKTOP_VIEWPORT['width']}x{DESKTOP_VIEWPORT['height']}",
+        user_agent=DESKTOP_USER_AGENT,
+        scraper_wait_until="domcontentloaded",
+        performance_run=performance_run,
+        scope_limitations=list(SCOPE_LIMITATIONS),
+        report_version=REPORT_VERSION,
+    )
 
 
 class JobManager:
@@ -95,6 +146,7 @@ class JobManager:
         job.status = AuditStatus.RUNNING
         job.progress["scrape"] = "running"
         job_started = time.perf_counter()
+        started_at = datetime.now(timezone.utc)
         logger.info("job.start job_id=%s url=%s", job_id, url)
 
         scrape_started = time.perf_counter()
@@ -164,6 +216,9 @@ class JobManager:
             accessibility=outcomes["accessibility"], seo=outcomes["seo"], copy=outcomes["copy"]
         )
         job.result = combine_report(audit_result, outcomes["performance"], visual, screenshots)
+        job.result.run_context = _build_run_context(
+            url, started_at, page_data, outcomes["performance"]
+        )
         job.status = AuditStatus.COMPLETED
         logger.info(
             "job.done job_id=%s url=%s duration=%.2fs overall_score=%s progress=%s",
@@ -184,12 +239,23 @@ class JobManager:
                 CategoryResult(
                     category=AuditCategory.VISUAL,
                     score=None,
+                    score_status=ScoreStatus.NOT_RUN,
                     summary=f"Analysis failed: {exc}",
                     recommendations=[],
                     raw_data=None,
                 ),
                 None,
             )
+
+        # Same rule as report.py's builder: a render we can't verify is not
+        # evidence, and a visual assessment written from a blank capture would
+        # contradict the very screenshot printed beside it.
+        if screenshots.quality is not None and screenshots.quality.is_degraded:
+            logger.info(
+                "job.visual_skipped url=%s reason=degraded_render detail=%s",
+                url, screenshots.quality.reason,
+            )
+            return insufficient_evidence_result(screenshots.quality), screenshots
 
         result = await run_agent_safely(self._visual_agent, url, {"screenshots": screenshots})
         return result, screenshots

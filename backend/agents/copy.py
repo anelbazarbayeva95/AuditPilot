@@ -22,12 +22,18 @@ import re
 from typing import Any, Optional, Union
 
 from agents.base import BaseAgent
+from agents.prioritization import prioritize
 from agents.prompts.copy import build_copy_prompt
 from gemini_client import GeminiClient, GeminiClientError
+from labels import humanize, pluralize
 from models.schemas import (
     AuditCategory,
+    CategoryCoverage,
     CategoryResult,
+    CopyDimension,
     CopyResult,
+    CoverageMethod,
+    DetectionMethod,
     Recommendation,
     ScrapedPageData,
     Severity,
@@ -65,13 +71,26 @@ class CopyAgent(BaseAgent):
         return CategoryResult(
             category=self.category,
             score=result.score,
+            score_explanation=(
+                "Gemini's holistic 0-100 copy quality score, reported as-is. This is a model "
+                "judgment, not a deduction-based measurement."
+            ),
+            coverage=coverage(),
             summary=_summarize(result),
             recommendations=[
-                Recommendation(
-                    title=insight.dimension.value.replace("_", " ").title(),
-                    description=insight.point,
-                    severity=Severity.MEDIUM,
-                    category=AuditCategory.COPY,
+                prioritize(
+                    Recommendation(
+                        title=humanize(insight.dimension),
+                        description=insight.point,
+                        severity=Severity.MEDIUM,
+                        category=AuditCategory.COPY,
+                        rule_id=insight.dimension.value,
+                        # Marked as model judgment so the report can present it
+                        # differently from a measured fact — the two carry very
+                        # different authority and shouldn't look alike.
+                        detection=DetectionMethod.AI_GENERATED,
+                        confidence=insight.confidence,
+                    )
                 )
                 for insight in result.recommendations
             ],
@@ -129,12 +148,31 @@ def _parse_copy_response(raw_response: str) -> CopyResult:
         raise CopyAgentError(f"Gemini response did not match the expected schema: {exc}") from exc
 
 
+def coverage() -> CategoryCoverage:
+    """The five dimensions the model was asked to judge, and the limits of doing so."""
+    return CategoryCoverage(
+        checks_run=[humanize(dimension) for dimension in CopyDimension],
+        checks_not_covered=[
+            "Factual accuracy of on-page claims",
+            "Brand voice and tone guidelines",
+            "Legal and regulatory review",
+            "Localization and translation quality",
+            "Body copy below the headings and CTAs captured",
+        ],
+        method=CoverageMethod.AI_ASSISTED,
+        notes=(
+            "Model-generated judgment over the page's title, meta description, headings, CTA "
+            "text, and link text. Observations are opinions with stated confidence, not measurements."
+        ),
+    )
+
+
 def _summarize(result: CopyResult) -> str:
     score_part = f"Copy score: {result.score:.0f}/100. " if result.score is not None else ""
     return (
-        f"{score_part}{len(result.strengths)} strength(s), "
-        f"{len(result.weaknesses)} weakness(es), "
-        f"{len(result.recommendations)} recommendation(s)."
+        f"{score_part}{pluralize(len(result.strengths), 'strength')}, "
+        f"{pluralize(len(result.weaknesses), 'weakness', 'weaknesses')}, "
+        f"{pluralize(len(result.recommendations), 'recommendation')}."
     )
 
 
