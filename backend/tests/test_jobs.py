@@ -157,3 +157,107 @@ class TestJobLifecycle:
         assert job.progress["copy"] in ("running", "pending")
 
         await wait_for_completion(manager, job_id)
+
+
+def make_limited_manager(**kwargs) -> JobManager:
+    agents = {
+        "accessibility_agent": FakeAgent(AuditCategory.ACCESSIBILITY, delay=kwargs.pop("delay", 0.0)),
+        "seo_agent": FakeAgent(AuditCategory.SEO),
+        "copy_agent": FakeAgent(AuditCategory.COPY),
+        "performance_agent": FakeAgent(AuditCategory.PERFORMANCE),
+        "visual_agent": FakeAgent(AuditCategory.VISUAL),
+        "scrape_fn": fake_scrape_ok,
+        "screenshot_fn": fake_screenshot_ok,
+    }
+    return JobManager(**agents, **kwargs)
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestConcurrencyLimit:
+    async def test_jobs_beyond_the_limit_wait_in_line(self):
+        manager = make_limited_manager(max_concurrent=1, delay=0.1)
+        first = manager.create_job("https://one.example")
+        second = manager.create_job("https://two.example")
+        await asyncio.sleep(0.03)  # let the first job take the only slot
+
+        assert manager.get_job(first).status == AuditStatus.RUNNING
+        waiting = manager.get_job(second)
+        assert waiting.status == AuditStatus.PENDING
+        assert waiting.queue_position == 1
+
+        assert (await wait_for_completion(manager, second)).status == AuditStatus.COMPLETED
+        assert manager.get_job(second).queue_position is None
+
+    async def test_no_queue_position_when_a_slot_is_free(self):
+        manager = make_limited_manager(max_concurrent=2)
+        job_id = manager.create_job("https://example.com")
+        assert manager.get_job(job_id).queue_position is None
+        await wait_for_completion(manager, job_id)
+
+    async def test_submissions_refused_once_the_queue_is_full(self):
+        from jobs import JobQueueFullError
+
+        manager = make_limited_manager(max_concurrent=1, max_queued=1, delay=0.1)
+        ids = [manager.create_job("https://one.example"), manager.create_job("https://two.example")]
+        with pytest.raises(JobQueueFullError):
+            manager.create_job("https://three.example")
+        for job_id in ids:
+            await wait_for_completion(manager, job_id)
+        # Capacity frees up as jobs finish.
+        await wait_for_completion(manager, manager.create_job("https://four.example"))
+
+
+class TestRetention:
+    async def test_finished_jobs_expire_after_the_retention_period(self):
+        clock = FakeClock()
+        manager = make_limited_manager(retention_seconds=60, clock=clock)
+        job_id = manager.create_job("https://example.com")
+        await wait_for_completion(manager, job_id)
+
+        clock.now += 59
+        assert manager.get_job(job_id) is not None
+        clock.now += 2
+        assert manager.get_job(job_id) is None
+
+    async def test_oldest_finished_jobs_are_evicted_beyond_the_cap(self):
+        manager = make_limited_manager(max_retained=2)
+        ids = []
+        for n in range(3):
+            ids.append(manager.create_job(f"https://{n}.example"))
+            await wait_for_completion(manager, ids[-1])
+
+        assert manager.get_job(ids[0]) is None
+        assert manager.get_job(ids[1]) is not None
+        assert manager.get_job(ids[2]) is not None
+
+    async def test_unfinished_jobs_are_never_evicted(self):
+        clock = FakeClock()
+        manager = make_limited_manager(retention_seconds=1, max_retained=1, clock=clock, delay=0.1)
+        job_id = manager.create_job("https://example.com")
+        await asyncio.sleep(0.02)
+        clock.now += 100
+        assert manager.get_job(job_id) is not None
+        await wait_for_completion(manager, job_id)
+
+
+class TestUnexpectedCrash:
+    async def test_crash_after_scrape_fails_the_job_instead_of_stranding_it(self, monkeypatch):
+        import jobs
+
+        def broken_combine(*args, **kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(jobs, "combine_report", broken_combine)
+        manager = make_limited_manager()
+        job = await wait_for_completion(manager, manager.create_job("https://example.com"))
+
+        assert job.status == AuditStatus.FAILED
+        assert "boom" in job.error
+        assert "running" not in job.progress.values()

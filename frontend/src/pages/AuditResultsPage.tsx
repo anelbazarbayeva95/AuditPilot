@@ -1,6 +1,6 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { ArrowLeft, Download, Gauge, Loader2, Search, ScanSearch, SlidersHorizontal, Zap } from "lucide-react"
-import { Navigate, useLocation, useNavigate } from "react-router-dom"
+import { Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom"
 
 import { CategoryCard } from "@/components/audit/CategoryCard"
 import { ChartsSection } from "@/components/audit/ChartsSection"
@@ -12,7 +12,8 @@ import { PrioritizedRecommendations } from "@/components/audit/PrioritizedRecomm
 import { ResultsSidebar, type SectionId } from "@/components/audit/ResultsSidebar"
 import { ResultsSubNav, type SubNavItem } from "@/components/audit/ResultsSubNav"
 import { VisualReviewCard } from "@/components/audit/VisualReviewCard"
-import { ApiError, downloadReportPdf } from "@/lib/api"
+import { Button } from "@/components/ui/button"
+import { ApiError, downloadReportPdf, getReportJob } from "@/lib/api"
 import { groupFindingsByTitle } from "@/lib/issueText"
 import { isCopyRawData, isVisualRawData } from "@/lib/rawData"
 import { actionsOf } from "@/lib/summary"
@@ -50,24 +51,88 @@ const SUB_NAV_TITLE: Record<SectionId, string> = {
 }
 
 /**
+ * Resolves which report to show, then renders it.
+ *
+ * Arriving from the progress page, the report is already in router state. On
+ * a refresh or a revisited link that state is gone, so the report is
+ * re-fetched from the backend by the `?job=` id — it keeps finished jobs for
+ * a limited time (JOB_RETENTION_SECONDS), after which the visitor is told to
+ * re-run rather than shown anything stale or placeholder.
+ */
+export function AuditResultsPage() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const jobId = searchParams.get("job")
+  const fromState = isLocationState(location.state) ? location.state : null
+  const [fetched, setFetched] = useState<LocationState | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (fromState || !jobId) return
+    let cancelled = false
+
+    getReportJob(jobId)
+      .then((job) => {
+        if (cancelled) return
+        if (job.status === "completed" && job.result) {
+          setFetched({ report: job.result, url: job.url })
+        } else if (job.status === "failed") {
+          setLoadError(job.error ?? "This audit failed.")
+        } else {
+          navigate(`/progress?job=${encodeURIComponent(jobId)}`, { replace: true })
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setLoadError(err instanceof ApiError ? err.message : "Couldn't load this report.")
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [fromState, jobId, navigate])
+
+  const resolved = fromState ?? fetched
+  if (resolved) return <ResultsView report={resolved.report} url={resolved.url} />
+  if (!jobId) return <Navigate to="/" replace />
+  return <ReportStatus error={loadError} onNewAudit={() => navigate("/")} />
+}
+
+function ReportStatus({ error, onNewAudit }: { error: string | null; onNewAudit: () => void }) {
+  return (
+    <main className="flex min-h-svh items-center justify-center px-4">
+      <div className="w-full max-w-[460px] rounded-[20px] border bg-card p-8 text-center" role="status">
+        {error ? (
+          <>
+            <h1 className="font-display text-lg font-bold">Report unavailable</h1>
+            <p className="mt-2 text-sm text-muted-foreground">{error}</p>
+            <Button className="mt-5" onClick={onNewAudit}>
+              Run a new audit
+            </Button>
+          </>
+        ) : (
+          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+            Loading report…
+          </div>
+        )}
+      </div>
+    </main>
+  )
+}
+
+/**
  * "Docs Layout" Results page: a compact shared header, a left rail that
  * switches which section is mounted (click-to-navigate, not scroll-spy —
  * only the active section exists in the DOM at a time), and a right rail of
  * jump links into whatever sub-blocks/issues that section actually has.
  */
-export function AuditResultsPage() {
-  const location = useLocation()
+function ResultsView({ report, url }: LocationState) {
   const navigate = useNavigate()
   const [active, setActive] = useState<SectionId>("summary")
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
-
-  if (!isLocationState(location.state)) {
-    // Direct navigation/refresh with no audit data — nothing real to show.
-    return <Navigate to="/" replace />
-  }
-
-  const { report, url } = location.state
 
   async function handleDownloadPdf() {
     setDownloadError(null)

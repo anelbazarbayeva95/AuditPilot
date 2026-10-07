@@ -15,6 +15,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 from browser_defaults import DESKTOP_LOCALE, DESKTOP_USER_AGENT, DESKTOP_VIEWPORT
+from egress_proxy import EgressProxy
 from models.schemas import ButtonData, ImageData, InputData, LinkData, ScrapedPageData
 from url_safety import UnsafeURLError, ensure_public_url
 
@@ -150,9 +151,12 @@ async def scrape_website(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> Scra
 
     browser = None
     try:
-        async with async_playwright() as pw:
+        # Every connection the browser makes — redirect hops, iframes,
+        # subresources — is re-checked by the egress proxy; the check above
+        # only covers the URL as submitted. See egress_proxy.py.
+        async with EgressProxy() as egress, async_playwright() as pw:
             try:
-                browser = await pw.chromium.launch(headless=True)
+                browser = await pw.chromium.launch(headless=True, proxy={"server": egress.server})
             except PlaywrightError as exc:
                 raise ScraperError(f"Failed to launch browser: {exc}") from exc
 
@@ -172,10 +176,10 @@ async def scrape_website(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> Scra
             except PlaywrightTimeoutError as exc:
                 raise ScraperError(f"Timed out loading '{url}' after {timeout_ms}ms") from exc
             except PlaywrightError as exc:
-                raise ScraperError(f"Failed to load '{url}': {exc}") from exc
+                raise ScraperError(egress.refusal(url) or f"Failed to load '{url}': {exc}") from exc
 
             if response is not None and response.status >= 400:
-                raise ScraperError(f"'{url}' responded with HTTP {response.status}")
+                raise ScraperError(egress.refusal(url) or f"'{url}' responded with HTTP {response.status}")
 
             # Recorded for the report's Methodology section: which URL was
             # actually audited (redirects are common and change what "the

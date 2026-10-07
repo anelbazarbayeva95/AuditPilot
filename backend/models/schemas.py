@@ -858,6 +858,9 @@ class ReportJob(BaseModel):
     progress: dict[str, str] = Field(default_factory=dict)
     result: Optional[StructuredAuditReport] = None
     error: Optional[str] = None
+    # 1-based place in line while the job waits for a free audit slot
+    # (status stays "pending"); None when it's running, finished, or never queued.
+    queue_position: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------

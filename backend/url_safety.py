@@ -9,14 +9,13 @@ called as the first thing `scrape_website()` does, so it's a single choke
 point that covers every entry path, including the screenshot/Lighthouse
 agents that only run after a scrape has already succeeded.
 
-Known limitation: this checks DNS resolution at call time, not at the
-moment Playwright actually connects, so a hostname that resolves publicly
-now but is rebound to a private IP by the time the browser navigates (DNS
-rebinding) would slip through. Closing that gap fully would require pinning
-the resolved IP into the browser's own connection, which Playwright doesn't
-expose cleanly — out of scope here. This still stops the overwhelming
-majority of real-world attempts (raw private/loopback/metadata IPs and
-hostnames that plainly resolve to them).
+The check here runs once, before navigation. It is not enough on its own: the
+browser then follows redirects and loads iframes/subresources without asking
+again (and Playwright's request routing never sees redirect hops). So every
+audit browser is additionally pointed at `egress_proxy.EgressProxy`, which runs
+`resolve_public_ips()` on every connection the browser opens and dials the
+vetted IP itself — which also closes the DNS-rebinding window between this
+check and the browser's own connection.
 """
 
 from __future__ import annotations
@@ -47,6 +46,15 @@ async def ensure_public_url(url: str) -> None:
     if not host:
         raise UnsafeURLError(f"URL '{url}' has no hostname")
 
+    await resolve_public_ips(host)
+
+
+async def resolve_public_ips(host: str) -> list[str]:
+    """Resolves `host` and returns its addresses, or raises UnsafeURLError if any is non-public.
+
+    Every address must be public, not just one: nothing guarantees which of
+    them a client ends up connecting to.
+    """
     try:
         # getaddrinfo is blocking, so run it off the event loop.
         infos = await asyncio.get_running_loop().run_in_executor(
@@ -55,7 +63,8 @@ async def ensure_public_url(url: str) -> None:
     except socket.gaierror as exc:
         raise UnsafeURLError(f"Could not resolve host '{host}': {exc}") from exc
 
-    resolved_ips = {info[4][0] for info in infos}
+    # Ordered de-dupe: getaddrinfo's order is the system's preference order.
+    resolved_ips = list(dict.fromkeys(info[4][0] for info in infos))
     if not resolved_ips:
         raise UnsafeURLError(f"Host '{host}' did not resolve to any address")
 
@@ -66,3 +75,4 @@ async def ensure_public_url(url: str) -> None:
             raise UnsafeURLError(
                 f"Host '{host}' resolves to non-public address {ip} — refusing to fetch"
             )
+    return resolved_ips

@@ -278,4 +278,6 @@ export interface ReportJob {
   progress: Record<ReportJobStep, StepState>
   result: StructuredAuditReport | null
   error: string | null
+  /** 1-based place in line while waiting for a free audit slot; null otherwise. */
+  queue_position?: number | null
 }

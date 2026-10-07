@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from egress_proxy import EgressProxy
 from models.schemas import PerformanceMetrics, PerformanceOpportunity, PerformanceRunConfig
 
 LIGHTHOUSE_TIMEOUT_S = 90
@@ -161,56 +162,64 @@ async def run_lighthouse(url: str) -> LighthouseRun:
     fd, output_path = tempfile.mkstemp(suffix=".json", prefix="lighthouse-")
     os.close(fd)
 
-    cmd = [
-        "npx", "--yes", "lighthouse", url,
-        "--output=json", f"--output-path={output_path}", "--quiet",
-        "--only-categories=performance",
-        # Explicit, not inherited: see LIGHTHOUSE_PRESET above.
-        f"--preset={LIGHTHOUSE_PRESET}",
-        # --disable-dev-shm-usage: containerized/serverless hosts commonly
-        # cap /dev/shm at 64MB, far below what Chrome's renderer wants for a
-        # real-world page. Without this, the renderer can crash mid-load,
-        # which Lighthouse's driver often surfaces as the misleading
-        # CHROME_INTERSTITIAL_ERROR ("Chrome prevented page load with an
-        # interstitial") rather than a clear crash message — this is the
-        # standard fix for Lighthouse/Puppeteer/Chrome-in-Docker deployments.
-        '--chrome-flags=--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage',
-    ]
-    try:
+    async with EgressProxy() as egress:
+        cmd = [
+            "npx", "--yes", "lighthouse", url,
+            "--output=json", f"--output-path={output_path}", "--quiet",
+            "--only-categories=performance",
+            # Explicit, not inherited: see LIGHTHOUSE_PRESET above.
+            f"--preset={LIGHTHOUSE_PRESET}",
+            # --disable-dev-shm-usage: containerized/serverless hosts commonly
+            # cap /dev/shm at 64MB, far below what Chrome's renderer wants for a
+            # real-world page. Without this, the renderer can crash mid-load,
+            # which Lighthouse's driver often surfaces as the misleading
+            # CHROME_INTERSTITIAL_ERROR ("Chrome prevented page load with an
+            # interstitial") rather than a clear crash message — this is the
+            # standard fix for Lighthouse/Puppeteer/Chrome-in-Docker deployments.
+            # --proxy-server: Lighthouse drives its own Chrome, so it gets the same
+            # egress guard as the Playwright browsers (egress_proxy.py) — otherwise
+            # a redirect to an internal host is audited and its resource URLs land
+            # in the report. <-loopback> removes Chrome's implicit localhost bypass.
+            "--chrome-flags=--headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage "
+            f"--proxy-server={egress.server} --proxy-bypass-list=<-loopback>",
+        ]
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=LIGHTHOUSE_TIMEOUT_S)
-        except asyncio.TimeoutError as exc:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=LIGHTHOUSE_TIMEOUT_S)
+            except asyncio.TimeoutError as exc:
+                duration = time.perf_counter() - started
+                logger.warning("lighthouse.failed url=%s duration=%.2fs error=timeout", url, duration)
+                raise LighthouseError(f"Lighthouse timed out auditing '{url}'") from exc
+            except OSError as exc:
+                duration = time.perf_counter() - started
+                logger.warning("lighthouse.failed url=%s duration=%.2fs error=%s", url, duration, exc)
+                raise LighthouseError(f"Failed to launch Lighthouse: {exc}") from exc
+
             duration = time.perf_counter() - started
-            logger.warning("lighthouse.failed url=%s duration=%.2fs error=timeout", url, duration)
-            raise LighthouseError(f"Lighthouse timed out auditing '{url}'") from exc
-        except OSError as exc:
-            duration = time.perf_counter() - started
-            logger.warning("lighthouse.failed url=%s duration=%.2fs error=%s", url, duration, exc)
-            raise LighthouseError(f"Failed to launch Lighthouse: {exc}") from exc
 
-        duration = time.perf_counter() - started
+            if proc.returncode != 0:
+                logger.warning(
+                    "lighthouse.failed url=%s duration=%.2fs returncode=%s stderr=%s",
+                    url, duration, proc.returncode, stderr.decode()[:500],
+                )
+                raise LighthouseError(
+                    egress.refusal(url) or f"Lighthouse exited {proc.returncode}: {stderr.decode()[:500]}"
+                )
 
-        if proc.returncode != 0:
-            logger.warning(
-                "lighthouse.failed url=%s duration=%.2fs returncode=%s stderr=%s",
-                url, duration, proc.returncode, stderr.decode()[:500],
-            )
-            raise LighthouseError(f"Lighthouse exited {proc.returncode}: {stderr.decode()[:500]}")
-
-        try:
-            with open(output_path, "r", encoding="utf-8") as f:
-                report = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("lighthouse.failed url=%s duration=%.2fs error=invalid_output: %s", url, duration, exc)
-            raise LighthouseError(f"Lighthouse produced no valid report: {exc}") from exc
-    finally:
-        try:
-            os.remove(output_path)
-        except OSError:
-            pass
+            try:
+                with open(output_path, "r", encoding="utf-8") as f:
+                    report = json.load(f)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("lighthouse.failed url=%s duration=%.2fs error=invalid_output: %s", url, duration, exc)
+                raise LighthouseError(f"Lighthouse produced no valid report: {exc}") from exc
+        finally:
+            try:
+                os.remove(output_path)
+            except OSError:
+                pass
 
     metrics = _parse_report(report)
     run_config = _parse_run_config(report)

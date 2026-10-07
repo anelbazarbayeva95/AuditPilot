@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { AlertCircle, CheckCircle2, Circle, Loader2, ScanSearch, Zap } from "lucide-react"
-import { Navigate, useLocation, useNavigate } from "react-router-dom"
+import { Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -59,45 +59,58 @@ export function AuditProgressPage() {
   const navigate = useNavigate()
   const [job, setJob] = useState<ReportJob | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
-  const navigatedRef = useRef(false)
+  const [searchParams] = useSearchParams()
+  const doneRef = useRef(false)
 
+  // Router state is lost on refresh; the ?job= param isn't, so polling resumes.
   const state = isLocationState(location.state) ? location.state : null
+  const jobId = state?.jobId ?? searchParams.get("job")
+  const auditedUrl = state?.url ?? job?.url ?? null
 
   useEffect(() => {
-    if (!state) return
+    if (!jobId) return
 
     let cancelled = false
+    doneRef.current = false
 
     async function poll() {
       try {
-        const current = await getReportJob(state!.jobId)
+        const current = await getReportJob(jobId!)
         if (cancelled) return
         setJob(current)
+        setPollError(null)
 
-        if (current.status === "completed" && current.result && !navigatedRef.current) {
-          navigatedRef.current = true
-          navigate("/results", { state: { report: current.result, url: state!.url } })
+        if (current.status === "completed" && current.result && !doneRef.current) {
+          doneRef.current = true
+          navigate(`/results?job=${encodeURIComponent(jobId!)}`, {
+            replace: true,
+            state: { report: current.result, url: current.url },
+          })
+        } else if (current.status === "failed") {
+          doneRef.current = true
         }
       } catch (err) {
         if (cancelled) return
         setPollError(
           err instanceof ApiError ? err.message : "Lost connection to the AuditPilot API."
         )
+        // A 404 means the job is gone (expired or the server restarted) — retrying can't help.
+        if (err instanceof ApiError && err.status === 404) doneRef.current = true
       }
     }
 
     poll()
     const interval = setInterval(() => {
-      if (!navigatedRef.current) poll()
+      if (!doneRef.current) poll()
     }, POLL_INTERVAL_MS)
 
     return () => {
       cancelled = true
       clearInterval(interval)
     }
-  }, [state, navigate])
+  }, [jobId, navigate])
 
-  if (!state) {
+  if (!jobId) {
     return <Navigate to="/" replace />
   }
 
@@ -116,8 +129,10 @@ export function AuditProgressPage() {
   const runningStep = STEP_ORDER.find((step) => (job?.progress[step] ?? "pending") === "running")
   const runningAgentIndex = runningStep ? AGENT_STEPS.indexOf(runningStep) : -1
   const pct = job ? Math.round((completedCount / STEP_ORDER.length) * 100) : 0
-  const agentLabel =
-    completedCount >= STEP_ORDER.length
+  const queuePosition = job?.queue_position ?? null
+  const agentLabel = queuePosition
+    ? "Queued"
+    : completedCount >= STEP_ORDER.length
       ? "Finishing up"
       : runningStep === "scrape"
         ? "Preparing page"
@@ -163,11 +178,21 @@ export function AuditProgressPage() {
               </div>
               <div
                 className="min-w-0 truncate font-display text-xl font-bold tracking-tight"
-                title={state.url}
+                title={auditedUrl ?? undefined}
               >
-                Auditing {formatDisplayUrl(state.url)}
+                {auditedUrl ? `Auditing ${formatDisplayUrl(auditedUrl)}` : "Auditing…"}
               </div>
             </div>
+
+            {queuePosition && (
+              <p className="mt-4 rounded-lg bg-secondary px-3.5 py-2.5 text-[13px] text-muted-foreground" role="status">
+                The audit server is busy.{" "}
+                {queuePosition === 1
+                  ? "Yours is next in line"
+                  : `${queuePosition - 1} ${queuePosition - 1 === 1 ? "audit is" : "audits are"} ahead of yours`}{" "}
+                and will start automatically.
+              </p>
+            )}
 
             <div className="mt-5 flex items-center justify-between">
               <span className="text-[13px] font-semibold text-muted-foreground">{agentLabel}</span>

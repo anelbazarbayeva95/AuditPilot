@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -63,6 +64,37 @@ ScreenshotFn = Callable[[str], Awaitable[PageScreenshots]]
 _STEPS = ("scrape", "accessibility", "seo", "copy", "performance", "visual")
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("config.invalid name=%s value=%r — using default %d", name, raw, default)
+        return default
+    return max(value, 1)
+
+
+# Each audit launches three Chromium instances (scrape, screenshots,
+# Lighthouse), so a handful of simultaneous audits is enough to exhaust a
+# small container. Audits beyond the limit wait their turn (status stays
+# "pending" and the job reports its place in line) rather than all starting at
+# once; past MAX_QUEUED_AUDITS waiting, new submissions are refused outright.
+MAX_CONCURRENT_AUDITS = _env_int("MAX_CONCURRENT_AUDITS", 2)
+MAX_QUEUED_AUDITS = _env_int("MAX_QUEUED_AUDITS", 10)
+
+# Finished jobs carry the whole report, base64 screenshots included, so they
+# can't be kept forever in an in-memory store. Long enough for the results
+# page to be refreshed or revisited; bounded in count as well as age.
+JOB_RETENTION_SECONDS = _env_int("JOB_RETENTION_SECONDS", 3600)
+MAX_RETAINED_JOBS = _env_int("MAX_RETAINED_JOBS", 100)
+
+
+class JobQueueFullError(Exception):
+    """Raised by create_job() when the audit queue is already at capacity."""
 
 
 def _build_run_context(
@@ -111,6 +143,11 @@ class JobManager:
         scrape_fn: Optional[ScrapeFn] = None,
         screenshot_fn: Optional[ScreenshotFn] = None,
         gemini_client: Optional[GeminiClient] = None,
+        max_concurrent: Optional[int] = None,
+        max_queued: Optional[int] = None,
+        retention_seconds: Optional[float] = None,
+        max_retained: Optional[int] = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._accessibility_agent = accessibility_agent or AccessibilityAgent()
         self._seo_agent = seo_agent or SEOAgent()
@@ -126,8 +163,30 @@ class JobManager:
         self._gemini_client = gemini_client or GeminiClient()
         self._jobs: dict[str, ReportJob] = {}
 
+        self._max_concurrent = max_concurrent or MAX_CONCURRENT_AUDITS
+        self._max_queued = max_queued if max_queued is not None else MAX_QUEUED_AUDITS
+        self._retention_seconds = retention_seconds if retention_seconds is not None else JOB_RETENTION_SECONDS
+        self._max_retained = max_retained or MAX_RETAINED_JOBS
+        self._clock = clock
+        self._slots = asyncio.Semaphore(self._max_concurrent)
+        # job id -> clock() at completion/failure; only finished jobs are evictable.
+        self._finished_at: dict[str, float] = {}
+        # The event loop only holds weak references to tasks, so an
+        # unreferenced background run can be garbage-collected mid-audit.
+        self._tasks: set[asyncio.Task] = set()
+
     def create_job(self, url: str) -> str:
-        """Registers a new job and kicks off its background run. Returns the job id."""
+        """Registers a new job and kicks off its background run. Returns the job id.
+
+        Raises JobQueueFullError when every slot is busy and the queue is full.
+        """
+        self._evict_expired()
+        unfinished = len(self._jobs) - len(self._finished_at)
+        if unfinished >= self._max_concurrent + self._max_queued:
+            raise JobQueueFullError(
+                "AuditPilot is at capacity right now — please try again in a few minutes."
+            )
+
         job_id = str(uuid.uuid4())
         self._jobs[job_id] = ReportJob(
             id=job_id,
@@ -135,11 +194,63 @@ class JobManager:
             status=AuditStatus.PENDING,
             progress={step: "pending" for step in _STEPS},
         )
-        asyncio.create_task(self._run(job_id, url))
+        task = asyncio.create_task(self._run_when_slot_free(job_id, url))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
         return job_id
 
     def get_job(self, job_id: str) -> Optional[ReportJob]:
-        return self._jobs.get(job_id)
+        self._evict_expired()
+        job = self._jobs.get(job_id)
+        if job is not None:
+            job.queue_position = self._queue_position(job)
+        return job
+
+    def audit_slot(self) -> asyncio.Semaphore:
+        """The concurrency gate, for the synchronous endpoints in main.py.
+
+        They launch the same browsers as a job, so they draw from the same
+        pool rather than bypassing the limit.
+        """
+        return self._slots
+
+    def _queue_position(self, job: ReportJob) -> Optional[int]:
+        """1-based place in line while waiting for a slot; None once running or done."""
+        if job.status != AuditStatus.PENDING or not self._slots.locked():
+            return None
+        waiting = [j.id for j in self._jobs.values() if j.status == AuditStatus.PENDING]
+        return waiting.index(job.id) + 1
+
+    def _evict_expired(self) -> None:
+        now = self._clock()
+        expired = [
+            job_id for job_id, finished in self._finished_at.items()
+            if now - finished > self._retention_seconds
+        ]
+        # Then the oldest finished jobs beyond the count cap. _finished_at is
+        # insertion-ordered by completion time, so the front is the oldest.
+        surplus = len(self._finished_at) - len(expired) - self._max_retained
+        if surplus > 0:
+            expired += [job_id for job_id in self._finished_at if job_id not in expired][:surplus]
+        for job_id in expired:
+            self._finished_at.pop(job_id, None)
+            self._jobs.pop(job_id, None)
+
+    async def _run_when_slot_free(self, job_id: str, url: str) -> None:
+        job = self._jobs[job_id]
+        try:
+            async with self._slots:
+                await self._run(job_id, url)
+        except Exception as exc:  # noqa: BLE001 - a crash must end the job, not strand it "running"
+            logger.exception("job.crashed job_id=%s url=%s", job_id, url)
+            job.status = AuditStatus.FAILED
+            job.error = f"Unexpected error building the report: {exc}"
+            for step, state in job.progress.items():
+                if state in ("pending", "running"):
+                    job.progress[step] = "failed"
+        finally:
+            job.queue_position = None
+            self._finished_at[job_id] = self._clock()
 
     async def _run(self, job_id: str, url: str) -> None:
         job = self._jobs[job_id]

@@ -215,7 +215,8 @@ export function UrlInputPage() {
 
     try {
       const jobId = await createReportJob(normalized)
-      navigate("/progress", { state: { jobId, url: normalized } })
+      // The job id also goes in the URL so a refresh can resume polling.
+      navigate(`/progress?job=${encodeURIComponent(jobId)}`, { state: { jobId, url: normalized } })
     } catch (err) {
       setApiError(
         err instanceof ApiError

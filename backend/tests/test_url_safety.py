@@ -7,7 +7,7 @@ import socket
 
 import pytest
 
-from url_safety import UnsafeURLError, ensure_public_url
+from url_safety import UnsafeURLError, ensure_public_url, resolve_public_ips
 
 
 def _mock_getaddrinfo(monkeypatch, *ips: str) -> None:
@@ -68,3 +68,15 @@ async def test_dns_failure_fails_closed(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
     with pytest.raises(UnsafeURLError, match="Could not resolve"):
         await ensure_public_url("https://does-not-resolve.example")
+
+
+async def test_resolve_public_ips_returns_addresses_in_resolver_order(monkeypatch):
+    # The egress proxy dials the first address, so order must be preserved.
+    _mock_getaddrinfo(monkeypatch, "93.184.216.34", "93.184.216.35", "93.184.216.34")
+    assert await resolve_public_ips("example.com") == ["93.184.216.34", "93.184.216.35"]
+
+
+async def test_resolve_public_ips_rejects_non_public(monkeypatch):
+    _mock_getaddrinfo(monkeypatch, "10.0.0.5")
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        await resolve_public_ips("internal.example")

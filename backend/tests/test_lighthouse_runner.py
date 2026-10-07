@@ -72,6 +72,26 @@ async def test_chrome_flags_include_disable_dev_shm_usage(monkeypatch):
     assert "--disable-dev-shm-usage" in chrome_flags_arg
 
 
+async def test_chrome_is_routed_through_the_egress_guard(monkeypatch):
+    # Lighthouse launches its own Chrome, outside Playwright — without the
+    # proxy flag a redirect to an internal host would be audited unchecked.
+    captured_cmd = {}
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        captured_cmd["cmd"] = cmd
+        with open(_output_path_from_cmd(cmd), "w", encoding="utf-8") as f:
+            json.dump(GOOD_REPORT, f)
+        return _FakeProcess(returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    await run_lighthouse("https://example.com")
+
+    chrome_flags_arg = next(arg for arg in captured_cmd["cmd"] if arg.startswith("--chrome-flags="))
+    assert "--proxy-server=http://127.0.0.1:" in chrome_flags_arg
+    assert "--proxy-bypass-list=<-loopback>" in chrome_flags_arg
+
+
 async def test_success_reads_report_from_output_file(monkeypatch):
     async def fake_create_subprocess_exec(*cmd, **kwargs):
         with open(_output_path_from_cmd(cmd), "w", encoding="utf-8") as f:

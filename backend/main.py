@@ -66,7 +66,7 @@ elif _key_after_dotenv and _key_after_dotenv != _key_before_dotenv:
 elif not _key_after_dotenv:
     _logger.info("startup.gemini_key_source=none (not found in process environment or dotenv file)")
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
@@ -81,9 +81,10 @@ from models.schemas import (
     StructuredAuditReport,
     StructuredPdfReportRequest,
 )
-from jobs import JobManager
+from jobs import JobManager, JobQueueFullError
 from orchestrator import AuditOrchestrator
 from pdf_report import build_pdf_report, build_pdf_report_from_structured
+from rate_limit import limit_audit_starts
 from report import ReportBuilder
 from scraper import ScraperError, scrape_website
 
@@ -178,7 +179,9 @@ async def health() -> HealthResponse:
     return HealthResponse()
 
 
-@app.post("/audit", response_model=ScrapedPageData, tags=["audit"])
+@app.post(
+    "/audit", response_model=ScrapedPageData, tags=["audit"], dependencies=[Depends(limit_audit_starts)]
+)
 async def audit(request: ScrapeRequest) -> ScrapedPageData:
     """Scrape a URL and return structured page data.
 
@@ -187,7 +190,8 @@ async def audit(request: ScrapeRequest) -> ScrapedPageData:
     this data lands in later milestones via the orchestrator + agents.
     """
     try:
-        return await scrape_website(str(request.url))
+        async with _job_manager.audit_slot():
+            return await scrape_website(str(request.url))
     except ScraperError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - guard against unexpected failures
@@ -197,7 +201,13 @@ async def audit(request: ScrapeRequest) -> ScrapedPageData:
         ) from exc
 
 
-@app.post("/audit/full", response_model=AuditResult, tags=["audit"])
+@app.post(
+    "/audit/full",
+    response_model=AuditResult,
+    tags=["audit"],
+    deprecated=True,
+    dependencies=[Depends(limit_audit_starts)],
+)
 async def audit_full(request: ScrapeRequest) -> AuditResult:
     """Run a full multi-agent audit: scrape the URL, then run Accessibility,
     SEO, and Copy agents in parallel (Milestone 5) and return the aggregated
@@ -211,7 +221,8 @@ async def audit_full(request: ScrapeRequest) -> AuditResult:
     PerformanceAgent/Lighthouse are not yet included (still a stub).
     """
     try:
-        return await _orchestrator.run(str(request.url))
+        async with _job_manager.audit_slot():
+            return await _orchestrator.run(str(request.url))
     except ScraperError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - guard against unexpected failures
@@ -221,7 +232,7 @@ async def audit_full(request: ScrapeRequest) -> AuditResult:
         ) from exc
 
 
-@app.post("/report/pdf", tags=["audit"])
+@app.post("/report/pdf", tags=["audit"], deprecated=True)
 async def report_pdf(request: PdfReportRequest) -> Response:
     """Render a previously-computed AuditResult (Milestone 8) as a downloadable PDF.
 
@@ -278,7 +289,13 @@ async def report_pdf_full(request: StructuredPdfReportRequest) -> Response:
     )
 
 
-@app.post("/report", response_model=StructuredAuditReport, tags=["audit"])
+@app.post(
+    "/report",
+    response_model=StructuredAuditReport,
+    tags=["audit"],
+    deprecated=True,
+    dependencies=[Depends(limit_audit_starts)],
+)
 async def report(request: ScrapeRequest) -> StructuredAuditReport:
     """Run all four agents (Accessibility, SEO, Copy, Performance) in parallel
     and return one combined report (Milestone 9):
@@ -290,7 +307,8 @@ async def report(request: ScrapeRequest) -> StructuredAuditReport:
     and sorted by severity — the prioritized issue/action-item list.
     """
     try:
-        return await _report_builder.build(str(request.url))
+        async with _job_manager.audit_slot():
+            return await _report_builder.build(str(request.url))
     except ScraperError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - guard against unexpected failures
@@ -300,7 +318,12 @@ async def report(request: ScrapeRequest) -> StructuredAuditReport:
         ) from exc
 
 
-@app.post("/report/jobs", status_code=status.HTTP_202_ACCEPTED, tags=["audit"])
+@app.post(
+    "/report/jobs",
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["audit"],
+    dependencies=[Depends(limit_audit_starts)],
+)
 async def create_report_job(request: ScrapeRequest) -> dict:
     """Start a background /report run (Milestone 10) and return its job id immediately.
 
@@ -309,16 +332,30 @@ async def create_report_job(request: ScrapeRequest) -> dict:
     completion (scrape -> accessibility/seo/copy/performance) rather than a
     simulated countdown.
     """
-    job_id = _job_manager.create_job(str(request.url))
+    try:
+        job_id = _job_manager.create_job(str(request.url))
+    except JobQueueFullError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+            headers={"Retry-After": "120"},
+        ) from exc
     return {"job_id": job_id, "status": "pending"}
 
 
 @app.get("/report/jobs/{job_id}", response_model=ReportJob, tags=["audit"])
 async def get_report_job(job_id: str) -> ReportJob:
-    """Current state of a background report job: status, per-step progress, and the result once completed."""
+    """Current state of a background report job: status, per-step progress, and the result once completed.
+
+    Finished jobs are kept for JOB_RETENTION_SECONDS (see jobs.py), after
+    which this returns 404 — the results page tells the visitor to re-run.
+    """
     job = _job_manager.get_job(job_id)
     if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No job with id '{job_id}'")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This audit is no longer available — results are kept for a limited time. Run a new audit.",
+        )
     return job
 
 

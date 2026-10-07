@@ -1,4 +1,4 @@
-should ai__pycache__/
+__pycache__/
 *.pyc
 .venv/
 .env

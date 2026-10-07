@@ -19,6 +19,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 from browser_defaults import DESKTOP_LOCALE, DESKTOP_USER_AGENT, DESKTOP_VIEWPORT
+from egress_proxy import EgressProxy
 from models.schemas import ScreenshotQuality
 from render_quality import analyze_render_quality
 
@@ -72,9 +73,11 @@ async def capture_screenshots(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) ->
     logger.info("screenshot.start url=%s", url)
     browser = None
     try:
-        async with async_playwright() as pw:
+        # Same egress guard as scraper.py: without it, a redirect or an iframe
+        # to an internal host would be rendered into the returned screenshot.
+        async with EgressProxy() as egress, async_playwright() as pw:
             try:
-                browser = await pw.chromium.launch(headless=True)
+                browser = await pw.chromium.launch(headless=True, proxy={"server": egress.server})
             except PlaywrightError as exc:
                 raise ScreenshotError(f"Failed to launch browser: {exc}") from exc
 
@@ -94,10 +97,10 @@ async def capture_screenshots(url: str, timeout_ms: int = DEFAULT_TIMEOUT_MS) ->
             except PlaywrightTimeoutError as exc:
                 raise ScreenshotError(f"Timed out loading '{url}' after {timeout_ms}ms") from exc
             except PlaywrightError as exc:
-                raise ScreenshotError(f"Failed to load '{url}': {exc}") from exc
+                raise ScreenshotError(egress.refusal(url) or f"Failed to load '{url}': {exc}") from exc
 
             if response is not None and response.status >= 400:
-                raise ScreenshotError(f"'{url}' responded with HTTP {response.status}")
+                raise ScreenshotError(egress.refusal(url) or f"'{url}' responded with HTTP {response.status}")
 
             await _settle_page(page)
 
